@@ -20,24 +20,47 @@ function WatchPage() {
     if (typeof window === "undefined") return "";
     return new URLSearchParams(window.location.search).get("url") ?? "";
   });
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [input, setInput] = useState(url);
   const [steps, setSteps] = useState<string[]>([]);
   const [screenshot, setScreenshot] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const esRef = useRef<EventSource | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const activeRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stepsEndRef = useRef<HTMLDivElement>(null);
 
+  // Poll /api/active when no URL is pinned
   useEffect(() => {
-    if (!url) return;
-    const id = dockId(url);
-    if (!id) return;
+    if (url) { clearInterval(activeRef.current ?? undefined); activeRef.current = null; return; }
+    const poll = setInterval(async () => {
+      try {
+        const res = await fetch("/api/active");
+        if (res.ok) {
+          const { id } = (await res.json()) as { id: string | null };
+          setActiveId((prev) => {
+            if (id !== prev) {
+              if (id) { setSteps([]); setScreenshot(null); setConnected(false); }
+            }
+            return id;
+          });
+        }
+      } catch { /* ignore */ }
+    }, 1000);
+    activeRef.current = poll;
+    return () => { clearInterval(poll); activeRef.current = null; };
+  }, [url]);
+
+  const watchId = url ? dockId(url) : activeId;
+
+  useEffect(() => {
+    if (!watchId) return;
 
     setSteps([]);
     setScreenshot(null);
     setConnected(false);
 
-    const es = new EventSource(`/api/watch?id=${encodeURIComponent(id)}`);
+    const es = new EventSource(`/api/watch?id=${encodeURIComponent(watchId)}`);
     esRef.current = es;
     es.onopen = () => setConnected(true);
     es.onmessage = (e) => {
@@ -50,7 +73,7 @@ function WatchPage() {
 
     const poll = setInterval(async () => {
       try {
-        const res = await fetch(`/api/screenshot?id=${encodeURIComponent(id)}`);
+        const res = await fetch(`/api/screenshot?id=${encodeURIComponent(watchId)}`);
         if (res.ok) {
           const blob = await res.blob();
           setScreenshot((prev) => {
@@ -68,7 +91,7 @@ function WatchPage() {
       esRef.current = null;
       pollRef.current = null;
     };
-  }, [url]);
+  }, [watchId]);
 
   useEffect(() => {
     stepsEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -107,9 +130,14 @@ function WatchPage() {
             Watch
           </button>
         </div>
-        {url && (
+        {watchId && (
           <span className={`ml-2 text-xs px-2 py-0.5 rounded-full ${connected ? "bg-[#1a3a28] text-[#5ab87a]" : "bg-[#2a1a1a] text-[#8a5a5a]"}`}>
             {connected ? "live" : "waiting"}
+          </span>
+        )}
+        {!url && !watchId && (
+          <span className="ml-2 text-xs px-2 py-0.5 rounded-full bg-[#1a2118] text-[#4a5a4e]">
+            auto
           </span>
         )}
       </header>
@@ -123,7 +151,7 @@ function WatchPage() {
           <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1">
             {steps.length === 0 && (
               <p className="text-xs text-[#3a4a3f] italic mt-4 px-1">
-                {url ? "Waiting for steps…" : "Enter a URL above."}
+                {watchId ? "Waiting for steps…" : url ? "Waiting for steps…" : "Watching for activity…"}
               </p>
             )}
             {steps.map((label, i) => (
@@ -150,7 +178,7 @@ function WatchPage() {
           ) : (
             <div className="text-center text-[#3a4a3f]">
               <div className="text-4xl mb-3">◌</div>
-              <p className="text-sm">{url ? "Screenshot will appear here." : "Enter a URL to start watching."}</p>
+              <p className="text-sm">{watchId ? "Screenshot will appear here." : url ? "Screenshot will appear here." : "Waiting for Berth to start a task…"}</p>
             </div>
           )}
         </main>

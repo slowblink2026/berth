@@ -111,6 +111,16 @@ declare global {
 if (!globalThis.__berthStepBus) globalThis.__berthStepBus = new Map();
 const stepBus = globalThis.__berthStepBus;
 
+declare global {
+  // eslint-disable-next-line no-var
+  var __berthActiveDockId: string | null;
+}
+if (!("__berthActiveDockId" in globalThis)) globalThis.__berthActiveDockId = null;
+
+export function getActiveDockId(): string | null {
+  return globalThis.__berthActiveDockId;
+}
+
 function emitStep(id: string, label: string) {
   stepBus.get(id)?.forEach((cb) => cb(label));
 }
@@ -967,6 +977,7 @@ export async function runTask(input: {
       if (!task) throw new Error("Say what you want done.");
       takeTaskSlot();
       pending.delete(clean);
+      globalThis.__berthActiveDockId = clean;
       let dock = await ensure(clean, input.homeUrl, input.currentUrl);
       const steps: Step[] = [];
       let surface = await capture(dock);
@@ -1164,6 +1175,8 @@ export async function runTask(input: {
       });
     } catch (error) {
       return fail(error);
+    } finally {
+      if (globalThis.__berthActiveDockId === clean) globalThis.__berthActiveDockId = null;
     }
   });
 }
