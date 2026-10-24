@@ -8,9 +8,9 @@ import type { DockResult, DockStatus, DockView, Step, Surface, SurfaceControl } 
 const VIEW_W = 1100;
 const VIEW_H = 720;
 const MAX_CHROME = 2;
-const MAX_MODEL_CALLS = 8;
+const MAX_MODEL_CALLS = 12;
 const TASK_WINDOW_MS = 10 * 60 * 1000;
-const TASK_BUDGET = 12;
+const TASK_BUDGET = 16;
 
 type Decision = {
   action: "click" | "type" | "scroll" | "scrollUp" | "press" | "done" | "hold";
@@ -394,10 +394,10 @@ async function captureChrome(dock: ChromeDock): Promise<Surface> {
         const style = getComputedStyle(el);
         return rect.width > 2 && rect.height > 2 && style.visibility !== "hidden" && style.display !== "none";
       };
-      const found: { tag: string; label: string }[] = [];
+      const found: { tag: string; label: string; href?: string }[] = [];
       const nodes = document.querySelectorAll("a, button, input, textarea, select, [role='button'], [role='link']");
       for (const el of nodes) {
-        if (found.length >= 30) break;
+        if (found.length >= 50) break;
         if (!visible(el)) continue;
         const label = (
           el.getAttribute("aria-label") ||
@@ -410,7 +410,8 @@ async function captureChrome(dock: ChromeDock): Promise<Surface> {
           .trim()
           .slice(0, 80);
         if (!label) continue;
-        found.push({ tag: el.tagName.toLowerCase(), label });
+        const href = el.tagName === "A" ? (el as HTMLAnchorElement).href || undefined : undefined;
+        found.push({ tag: el.tagName.toLowerCase(), label, href });
       }
       return {
         title: document.title,
@@ -432,7 +433,7 @@ async function captureChrome(dock: ChromeDock): Promise<Surface> {
     title: title || url,
     image,
     text: text.slice(0, 6000),
-    controls: controls.slice(0, 24),
+    controls: controls.slice(0, 30),
     engine: "chrome",
     challenge: looksLikeChallenge(title, text, url),
   };
@@ -543,8 +544,8 @@ async function askModel(input: {
 }): Promise<Decision> {
   const call = modelCall();
   const controls = input.surface.controls
-    .slice(0, 24)
-    .map((control) => `- ${control.label}`)
+    .slice(0, 30)
+    .map((control) => (control.href ? `- ${control.label} → ${control.href}` : `- ${control.label}`))
     .join("\n");
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (call.apiKey) headers.Authorization = `Bearer ${call.apiKey}`;
@@ -558,6 +559,7 @@ async function askModel(input: {
         "If the answer is already on screen, use done and put it in summary. Do not click just to look busy.",
         "Never repeat a step that is already listed.",
         "If the goal needs another page, a menu, search, or a banner out of the way, click, scroll, or type. Do not wait for the user to say click.",
+        "Controls show '→ URL' when a link has a known address. To follow one reliably, use click with the full URL as target instead of the label.",
         "Use scroll to reveal content below the fold. Use scrollUp to go back up if you overshot.",
         "To search, use action type and put the query in text. Do not open Chat, Ask AI, or voice chat.",
         "Do not guess personal facts. Do not type a name, passport number, date of birth, address, or card number unless that exact fact is written in the task.",
@@ -753,7 +755,8 @@ async function perform(dock: ChromeDock, decision: Decision) {
       .or(page.getByPlaceholder(name))
       .or(page.getByText(name, { exact: false }))
       .first();
-    await locator.click({ timeout: 5000 });
+    await locator.evaluate((el) => el.scrollIntoView({ block: "center" })).catch(() => undefined);
+    await locator.click({ timeout: 8000 });
     await settle(page);
   }
 }
@@ -955,6 +958,7 @@ export async function runTask(input: {
             status: "hold",
           });
         }
+        let clickMissed = false;
         try {
           const tagged = decision.target.match(/^(?:a|button|input|textarea|select):\s*(.+)$/i);
           if (tagged?.[1]) decision = { ...decision, target: tagged[1].trim() };
@@ -963,24 +967,47 @@ export async function runTask(input: {
           await new Promise((r) => setTimeout(r, 800));
           try {
             await perform(dock, decision);
-          } catch (error) {
-            const message = error instanceof Error ? error.message.split("\n")[0] : "The step failed.";
-            surface = await capture(dock);
-            const answer = await askModel({
-              task,
-              memory,
-              vaultHeld: held(clean),
-              surface,
-              steps: [...steps.map((step) => step.label), message],
-              finish: true,
-            });
-            return viewFrom(surface, {
-              vaultHeld: held(clean),
-              steps: [...steps, { label: "The click missed. Answered from the page." }],
-              summary: answerFromPage(answer.summary, steps, surface),
-              status: "ready",
-            });
+          } catch {
+            if (decision.action === "click") {
+              // Try href navigation before giving up
+              const target = decision.target.toLowerCase();
+              const link = surface.controls.find(
+                (c) => c.href && c.label.toLowerCase().includes(target),
+              );
+              if (link?.href) {
+                try {
+                  const next = await assertPublicUrl(link.href);
+                  await dock.page.goto(next.toString(), { waitUntil: "domcontentloaded", timeout: 20000 });
+                  await settle(dock.page);
+                  steps.push({ label: `Navigated to ${decision.target}.` });
+                  clickMissed = false;
+                } catch {
+                  clickMissed = true;
+                }
+              } else {
+                clickMissed = true;
+              }
+            } else {
+              clickMissed = true;
+            }
           }
+        }
+        if (clickMissed) {
+          surface = await capture(dock);
+          const answer = await askModel({
+            task,
+            memory,
+            vaultHeld: held(clean),
+            surface,
+            steps: [...steps.map((step) => step.label), "The last action missed."],
+            finish: true,
+          });
+          return viewFrom(surface, {
+            vaultHeld: held(clean),
+            steps: [...steps, { label: "The action missed. Answered from the page." }],
+            summary: answerFromPage(answer.summary, steps, surface),
+            status: "ready",
+          });
         }
         const left = await guardSite(dock);
         if (dock.page.url().includes("#chat")) {
