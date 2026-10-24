@@ -8,7 +8,7 @@ import type { DockResult, DockStatus, DockView, Step, Surface, SurfaceControl } 
 const VIEW_W = 1100;
 const VIEW_H = 720;
 const MAX_CHROME = 2;
-const MAX_MODEL_CALLS = 5;
+const MAX_MODEL_CALLS = 8;
 const TASK_WINDOW_MS = 10 * 60 * 1000;
 const TASK_BUDGET = 12;
 
@@ -543,7 +543,8 @@ async function askModel(input: {
         "If the answer is already on screen, use done and put it in summary. Do not click just to look busy.",
         "Never repeat a step that is already listed.",
         "If the goal needs another page, a menu, search, or a banner out of the way, click, scroll, or type. Do not wait for the user to say click.",
-        "On a search page, open the official result. Prefer gov.uk over ads or other sites. After leaving the search page, stay on that site.",
+        "You may search and follow links onto other public sites when that serves the task. Prefer the official site. Once the answer is on screen, use done.",
+        "Do not guess personal facts. Do not type a name, passport number, date of birth, address, or card number unless that exact fact is written in the task.",
         input.finish
           ? "No more actions. action must be done. summary is only the labels of the controls visible now, separated by commas. Do not say you clicked anything."
           : "",
@@ -714,26 +715,18 @@ async function perform(dock: ChromeDock, decision: Decision) {
   }
 }
 
-function isSearchHost(url: string): boolean {
-  try {
-    const host = new URL(url).hostname.toLowerCase();
-    return /(^|\.)google\.[a-z.]+$/.test(host) || /(^|\.)duckduckgo\.com$/.test(host);
-  } catch {
-    return false;
-  }
-}
-
 async function guardSite(dock: ChromeDock): Promise<string | null> {
   const url = dock.page.url();
   if (!url.startsWith("http")) return null;
   if (sameSite(dock.homeUrl, url)) return null;
-  if (isSearchHost(dock.homeUrl)) {
+  try {
     const next = await assertPublicUrl(url);
     dock.homeUrl = next.origin;
     return null;
+  } catch {
+    await dock.page.goBack({ timeout: 8000 }).catch(() => undefined);
+    return "That page isn't a public site, so the browser stepped back.";
   }
-  await dock.page.goBack({ timeout: 8000 }).catch(() => undefined);
-  return "That left this dock's site, so the page was stepped back.";
 }
 
 function held(id: string): boolean {
@@ -964,7 +957,7 @@ export async function gesture(input: {
       } else if (input.kind === "follow") {
         const href = String(input.href ?? "");
         const next = await assertPublicUrl(href);
-        if (!sameSite(dock.homeUrl, next.toString())) throw new Error("That leaves this dock's site.");
+        dock.homeUrl = next.origin;
         if (dock.kind === "chrome") {
           await dock.page.goto(next.toString(), { waitUntil: "domcontentloaded", timeout: 20000 });
           await settle(dock.page);
@@ -973,7 +966,7 @@ export async function gesture(input: {
           dock.url = read.finalUrl;
           dock.html = read.html;
         }
-        steps.push({ label: "Opened a link on this site." });
+        steps.push({ label: "Opened the link." });
       }
       const surface = await capture(dock.kind === "chrome" ? docks.get(id) as ChromeDock : dock);
       const fresh = docks.get(id) ?? dock;
