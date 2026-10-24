@@ -529,7 +529,7 @@ async function askModel(input: {
   const call = modelCall();
   const controls = input.surface.controls
     .slice(0, 24)
-    .map((control) => `- ${control.tag}: ${control.label}`)
+    .map((control) => `- ${control.label}`)
     .join("\n");
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (call.apiKey) headers.Authorization = `Bearer ${call.apiKey}`;
@@ -546,9 +546,9 @@ async function askModel(input: {
         "You may search and follow links onto other public sites when that serves the task. Prefer the official site. Once the answer is on screen, use done.",
         "Do not guess personal facts. Do not type a name, passport number, date of birth, address, or card number unless that exact fact is written in the task.",
         input.finish
-          ? "No more actions. action must be done. summary is only the labels of the controls visible now, separated by commas. Do not say you clicked anything."
+          ? "No more actions. action must be done. summary answers the task from the visible page. Do not claim a click."
           : "",
-        "click target is the visible label of a control on this page.",
+        "click target is the visible label only. Never include a tag such as a: or button:.",
         "Never invent or repeat a password. If a login is required and a saved login exists, set useVault true and leave text empty.",
         "If the page is a human check, use hold.",
         "If the step would pay, send money, delete, subscribe, or change a password, set sensitive true and use hold.",
@@ -869,14 +869,25 @@ export async function runTask(input: {
           });
         }
         try {
+          const tagged = decision.target.match(/^(?:a|button|input|textarea|select):\s*(.+)$/i);
+          if (tagged?.[1]) decision = { ...decision, target: tagged[1].trim() };
           await perform(dock, decision);
         } catch (error) {
-          const message = error instanceof Error ? error.message : "The step failed.";
-          return viewFrom(await capture(dock), {
+          const message = error instanceof Error ? error.message.split("\n")[0] : "The step failed.";
+          surface = await capture(dock);
+          const answer = await askModel({
+            task,
+            memory,
             vaultHeld: held(id),
-            steps: [...steps, { label: message }],
-            summary: "The last step didn't land. You can click the view yourself.",
-            status: "hold",
+            surface,
+            steps: [...steps.map((step) => step.label), message],
+            finish: true,
+          });
+          return viewFrom(surface, {
+            vaultHeld: held(id),
+            steps: [...steps, { label: "The click missed. Answered from the page." }],
+            summary: answerFromPage(answer.summary, steps, surface),
+            status: "ready",
           });
         }
         const left = await guardSite(dock);
