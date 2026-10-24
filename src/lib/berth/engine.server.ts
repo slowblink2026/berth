@@ -479,6 +479,8 @@ async function askModel(input: {
   memory: string;
   vaultHeld: boolean;
   surface: Surface;
+  steps: string[];
+  finish?: boolean;
 }): Promise<Decision> {
   const call = modelCall();
   const controls = input.surface.controls
@@ -502,7 +504,11 @@ async function askModel(input: {
             '{"action":"click"|"type"|"scroll"|"press"|"done"|"hold","target":"","text":"","useVault":false,"sensitive":false,"summary":"","reason":""}',
             "Decide the next step yourself. Reply with one step only.",
             "If the answer is already on screen, use done and put it in summary. Do not click just to look busy.",
+            "Never repeat a step that is already listed.",
             "If the goal needs another page, a menu, search, or a banner out of the way, click, scroll, or type. Do not wait for the user to say click.",
+            input.finish
+              ? "No more actions. action must be done. summary answers the task from the page as it is now."
+              : "",
             "click target is the visible label of a control on this page.",
             "Never invent or repeat a password. If a login is required and a saved login exists, set useVault true and leave text empty.",
             "If the page is a human check, use hold.",
@@ -514,6 +520,7 @@ async function askModel(input: {
           role: "user",
           content: [
             `Task: ${input.task}`,
+            `Steps already taken: ${input.steps.length ? input.steps.join(" ") : "(none)"}`,
             `Dock note: ${input.memory || "(none)"}`,
             `Saved login on this host: ${input.vaultHeld ? "yes" : "no"}`,
             `URL: ${input.surface.url}`,
@@ -711,9 +718,34 @@ export async function runTask(input: {
         });
       }
       for (let i = 0; i < MAX_MODEL_CALLS; i += 1) {
-        const decision = await askModel({ task, memory, vaultHeld: held(id), surface });
+        const repeated = (decision: Decision) =>
+          decision.action === "click" &&
+          steps.some((step) => step.label.toLowerCase() === stepLabel(decision).toLowerCase());
+        let finish = i === MAX_MODEL_CALLS - 1;
+        let decision = await askModel({
+          task,
+          memory,
+          vaultHeld: held(id),
+          surface,
+          steps: steps.map((step) => step.label),
+          finish,
+        });
+        if (repeated(decision)) {
+          finish = true;
+          decision = await askModel({
+            task,
+            memory,
+            vaultHeld: held(id),
+            surface,
+            steps: steps.map((step) => step.label),
+            finish: true,
+          });
+        }
+        if (finish && decision.action !== "done" && decision.action !== "hold") {
+          decision = { ...decision, action: "done" };
+        }
         steps.push({ label: stepLabel(decision) });
-        if (decision.action === "done") {
+        if (decision.action === "done" || finish) {
           return viewFrom(surface, {
             vaultHeld: held(id),
             steps,
