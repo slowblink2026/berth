@@ -630,7 +630,7 @@ function isSensitive(decision: Decision): boolean {
 function answerFromPage(summary: string, steps: Step[], surface: Surface): string {
   const labels = [...new Set(surface.controls.map((control) => control.label.trim()).filter(Boolean))].slice(0, 12);
   const claimed = summary.trim();
-  const mentionsClick = /\bclick/i.test(claimed);
+  const mentionsClick = /^(click|clicked)\b/i.test(claimed);
   const didThatClick = steps.some((step) => {
     if (!step.label.startsWith("Clicked ")) return false;
     const target = step.label.slice("Clicked ".length).replace(/\.$/, "").toLowerCase();
@@ -710,6 +710,12 @@ async function perform(dock: ChromeDock, decision: Decision) {
   if (decision.action === "click") {
     const name = decision.target.trim();
     if (!name) throw new Error("The assistant didn't name a control.");
+    if (/^https?:\/\//i.test(name)) {
+      const next = await assertPublicUrl(name);
+      await page.goto(next.toString(), { waitUntil: "domcontentloaded", timeout: 20000 });
+      await settle(page);
+      return;
+    }
     const locator = page
       .getByRole("link", { name })
       .or(page.getByRole("button", { name }))
@@ -843,7 +849,7 @@ export async function runTask(input: {
           decision = {
             action: "type",
             target: "",
-            text: task.replace(/\s+/g, " ").trim().slice(0, 180),
+            text: task.split(/[.!?]/)[0]?.replace(/\s+/g, " ").trim().slice(0, 120) || task.slice(0, 120),
             useVault: false,
             sensitive: false,
             summary: "",
