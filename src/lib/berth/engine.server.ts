@@ -543,19 +543,34 @@ function parseDecision(raw: string): Decision {
   const start = raw.indexOf("{");
   const end = raw.lastIndexOf("}");
   if (start < 0 || end <= start) throw new Error("The assistant didn't return a step.");
-  const json = JSON.parse(raw.slice(start, end + 1)) as Record<string, unknown>;
-  const action = String(json.action ?? "");
+  const slice = raw.slice(start, end + 1);
+  const loosened = slice.replace(/,\s*([}\]])/g, "$1").replace(/"\s+"/g, '","');
+  let json: Record<string, unknown> | null = null;
+  try {
+    json = JSON.parse(slice) as Record<string, unknown>;
+  } catch {
+    try {
+      json = JSON.parse(loosened) as Record<string, unknown>;
+    } catch {
+      json = null;
+    }
+  }
+  const pick = (key: string) => {
+    const match = slice.match(new RegExp(`"${key}"\\s*:\\s*"([^"]*)"`, "i"));
+    return match?.[1] ?? "";
+  };
+  const action = String(json?.action ?? pick("action") ?? "").toLowerCase();
   if (!["click", "type", "scroll", "press", "done", "hold"].includes(action)) {
     throw new Error("The assistant returned an unknown step.");
   }
   return {
     action: action as Decision["action"],
-    target: String(json.target ?? "").slice(0, 160),
-    text: String(json.text ?? "").slice(0, 400),
-    useVault: Boolean(json.useVault),
-    sensitive: Boolean(json.sensitive),
-    summary: String(json.summary ?? "").slice(0, 900),
-    reason: String(json.reason ?? "").slice(0, 400),
+    target: String(json?.target ?? pick("target")).slice(0, 160),
+    text: String(json?.text ?? pick("text")).slice(0, 400),
+    useVault: Boolean(json?.useVault),
+    sensitive: Boolean(json?.sensitive),
+    summary: String(json?.summary ?? pick("summary")).slice(0, 900),
+    reason: String(json?.reason ?? pick("reason")).slice(0, 400),
   };
 }
 
