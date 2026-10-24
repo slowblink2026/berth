@@ -13,7 +13,7 @@ const TASK_WINDOW_MS = 10 * 60 * 1000;
 const TASK_BUDGET = 12;
 
 type Decision = {
-  action: "click" | "type" | "scroll" | "press" | "done" | "hold";
+  action: "click" | "type" | "scroll" | "scrollUp" | "press" | "done" | "hold";
   target: string;
   text: string;
   useVault: boolean;
@@ -91,6 +91,7 @@ type ReaderDock = {
   homeUrl: string;
   url: string;
   html: string;
+  extracted?: { title: string; text: string; controls: SurfaceControl[] };
   touched: number;
 };
 
@@ -100,7 +101,7 @@ const docks = new Map<string, Dock>();
 const secrets = new Map<string, string>();
 const pending = new Map<string, Decision>();
 const taskStamps: number[] = [];
-let queue: Promise<unknown> = Promise.resolve();
+const queues = new Map<string, Promise<unknown>>();
 let chromeFailedAt = 0;
 
 const CHROME_ARGS = [
@@ -117,12 +118,21 @@ const KEYS = new Set(["Enter", "Tab", "Escape", "ArrowDown", "ArrowUp"]);
 const SENSITIVE_RE =
   /\b(pay|purchase|buy now|delete|place order|send money|checkout|transfer|subscribe|change password|reset password)\b/i;
 
-function enqueue<T>(fn: () => Promise<T>): Promise<T> {
-  const run = queue.then(fn, fn);
-  queue = run.then(
-    () => undefined,
-    () => undefined,
-  );
+const dnsCache = new Map<string, { ips: string[]; at: number }>();
+const DNS_TTL = 60_000;
+
+async function resolveHost(host: string): Promise<string[]> {
+  const cached = dnsCache.get(host);
+  if (cached && Date.now() - cached.at < DNS_TTL) return cached.ips;
+  const ips = isIP(host) ? [host] : (await lookup(host, { all: true })).map((r) => r.address);
+  dnsCache.set(host, { ips, at: Date.now() });
+  return ips;
+}
+
+function enqueueFor<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prior = queues.get(key) ?? Promise.resolve();
+  const run = prior.then(fn, fn);
+  queues.set(key, run.then(() => undefined, () => undefined));
   return run;
 }
 
@@ -153,7 +163,7 @@ async function assertPublicUrl(raw: string): Promise<URL> {
   }
   let ips: string[] = [];
   try {
-    ips = isIP(host) ? [host] : (await lookup(host, { all: true })).map((row) => row.address);
+    ips = await resolveHost(host);
   } catch {
     throw new Error("That site didn't resolve.");
   }
@@ -186,11 +196,11 @@ function looksLikeChallenge(title: string, text: string, url: string): boolean {
 function decode(value: string): string {
   return value
     .replace(/&nbsp;/gi, " ")
-    .replace(/&/gi, "&")
-    .replace(/</gi, "<")
-    .replace(/>/gi, ">")
-    .replace(/"/gi, '"')
-    .replace(/&#39;|'/gi, "'")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
     .replace(/&#(\d+);/g, (_, n: string) => {
       const code = Number(n);
       if (!Number.isFinite(code) || code < 32 || code > 0x10ffff) return " ";
@@ -256,15 +266,16 @@ async function readPage(url: string): Promise<{ finalUrl: string; html: string }
 }
 
 function readerSurface(dock: ReaderDock): Surface {
-  const extracted = extractHtml(dock.html, dock.url);
+  if (!dock.extracted) dock.extracted = extractHtml(dock.html, dock.url);
+  const ex = dock.extracted;
   return {
     url: dock.url,
-    title: extracted.title || dock.url,
+    title: ex.title || dock.url,
     image: null,
-    text: extracted.text.slice(0, 6000),
-    controls: extracted.controls,
+    text: ex.text.slice(0, 6000),
+    controls: ex.controls,
     engine: "reader",
-    challenge: looksLikeChallenge(extracted.title, extracted.text, dock.url),
+    challenge: looksLikeChallenge(ex.title, ex.text, dock.url),
   };
 }
 
@@ -293,7 +304,11 @@ async function openChromeContext(id: string): Promise<PWContext> {
   } catch (error) {
     console.error("[berth] persistent chrome failed:", error);
     const browser = await chromium.launch({ headless: false, args: CHROME_ARGS, timeout: 20000 });
-    return browser.newContext({ viewport: { width: VIEW_W, height: VIEW_H }, colorScheme: "light" });
+    const ctx = await browser.newContext({ viewport: { width: VIEW_W, height: VIEW_H }, colorScheme: "light" });
+    (ctx as unknown as { on?: (ev: string, fn: () => void) => void }).on?.("close", () =>
+      browser.close().catch(() => undefined),
+    );
+    return ctx;
   }
 }
 
@@ -301,11 +316,13 @@ async function evictChrome(keepId: string) {
   const open = [...docks.values()].filter((dock): dock is ChromeDock => dock.kind === "chrome");
   if (open.length < MAX_CHROME) return;
   open.sort((a, b) => a.touched - b.touched);
+  let count = open.length;
   for (const dock of open) {
     if (dock.id === keepId) continue;
     await dock.context.close().catch(() => undefined);
     docks.delete(dock.id);
-    if ([...docks.values()].filter((item) => item.kind === "chrome").length < MAX_CHROME) return;
+    count--;
+    if (count < MAX_CHROME) return;
   }
 }
 
@@ -370,11 +387,8 @@ async function ensure(id: string, homeUrl: string, currentUrl: string): Promise<
 
 async function captureChrome(dock: ChromeDock): Promise<Surface> {
   const url = dock.page.url();
-  let title = "";
-  let text = "";
-  let controls: SurfaceControl[] = [];
-  try {
-    const data = await dock.page.evaluate(() => {
+  const [evalResult, shotResult] = await Promise.allSettled([
+    dock.page.evaluate(() => {
       const visible = (el: Element) => {
         const rect = el.getBoundingClientRect();
         const style = getComputedStyle(el);
@@ -385,7 +399,13 @@ async function captureChrome(dock: ChromeDock): Promise<Surface> {
       for (const el of nodes) {
         if (found.length >= 30) break;
         if (!visible(el)) continue;
-        const label = (el.getAttribute("aria-label") || el.textContent || el.getAttribute("placeholder") || el.getAttribute("name") || "")
+        const label = (
+          el.getAttribute("aria-label") ||
+          el.textContent ||
+          el.getAttribute("placeholder") ||
+          el.getAttribute("name") ||
+          ""
+        )
           .replace(/\s+/g, " ")
           .trim()
           .slice(0, 80);
@@ -397,21 +417,16 @@ async function captureChrome(dock: ChromeDock): Promise<Surface> {
         text: (document.body?.innerText ?? "").replace(/\n{3,}/g, "\n\n").slice(0, 8000),
         controls: found,
       };
-    });
-    title = data.title;
-    text = data.text;
-    controls = data.controls;
-  } catch {
-    title = "";
-    text = "";
-  }
-  let image: string | null = null;
-  try {
-    const shot = await dock.page.screenshot({ type: "jpeg", quality: 46 });
-    image = `data:image/jpeg;base64,${shot.toString("base64")}`;
-  } catch {
-    image = null;
-  }
+    }),
+    dock.page.screenshot({ type: "jpeg", quality: 46 }),
+  ]);
+  const title = evalResult.status === "fulfilled" ? evalResult.value.title : "";
+  const text = evalResult.status === "fulfilled" ? evalResult.value.text : "";
+  const controls = evalResult.status === "fulfilled" ? evalResult.value.controls : [];
+  const image =
+    shotResult.status === "fulfilled"
+      ? `data:image/jpeg;base64,${shotResult.value.toString("base64")}`
+      : null;
   return {
     url,
     title: title || url,
@@ -538,11 +553,12 @@ async function askModel(input: {
       role: "system",
       content: [
         "You operate one website dock. Reply with JSON only, no markdown.",
-        '{"action":"click"|"type"|"scroll"|"press"|"done"|"hold","target":"","text":"","useVault":false,"sensitive":false,"summary":"","reason":""}',
+        '{"action":"click"|"type"|"scroll"|"scrollUp"|"press"|"done"|"hold","target":"","text":"","useVault":false,"sensitive":false,"summary":"","reason":""}',
         "Decide the next step yourself. Reply with one step only.",
         "If the answer is already on screen, use done and put it in summary. Do not click just to look busy.",
         "Never repeat a step that is already listed.",
         "If the goal needs another page, a menu, search, or a banner out of the way, click, scroll, or type. Do not wait for the user to say click.",
+        "Use scroll to reveal content below the fold. Use scrollUp to go back up if you overshot.",
         "To search, use action type and put the query in text. Do not open Chat, Ask AI, or voice chat.",
         "Do not guess personal facts. Do not type a name, passport number, date of birth, address, or card number unless that exact fact is written in the task.",
         input.finish
@@ -608,7 +624,7 @@ function parseDecision(raw: string): Decision {
     return match?.[1] ?? "";
   };
   const action = String(json?.action ?? pick("action") ?? "").toLowerCase();
-  if (!["click", "type", "scroll", "press", "done", "hold"].includes(action)) {
+  if (!["click", "type", "scroll", "scrollUp", "press", "done", "hold"].includes(action)) {
     throw new Error("The assistant returned an unknown step.");
   }
   return {
@@ -647,7 +663,8 @@ function answerFromPage(summary: string, steps: Step[], surface: Surface): strin
 function stepLabel(decision: Decision): string {
   if (decision.action === "done") return "Answered from the page.";
   if (decision.action === "hold") return decision.reason || "Paused for you.";
-  if (decision.action === "scroll") return "Scrolled the page.";
+  if (decision.action === "scroll") return "Scrolled down the page.";
+  if (decision.action === "scrollUp") return "Scrolled up the page.";
   if (decision.action === "press") return `Pressed ${KEYS.has(decision.target) ? decision.target : "Enter"}.`;
   if (decision.action === "type" && decision.useVault) return "Used the saved login.";
   if (decision.action === "type") return decision.target ? `Typed into ${decision.target}.` : "Typed into the page.";
@@ -660,16 +677,20 @@ function pendingLabel(decision: Decision): string {
   return `This would ${decision.action} ${decision.target || "the page"}. Approve it, or leave it.`;
 }
 
+function isRepeated(label: string, history: Step[]): boolean {
+  return history.filter((s) => s.label.toLowerCase() === label.toLowerCase()).length >= 2;
+}
+
 async function settle(page: PWPage) {
-  await new Promise((resolve) => setTimeout(resolve, 450));
   await page.evaluate(() => document.readyState).catch(() => undefined);
+  await new Promise((resolve) => setTimeout(resolve, 150));
 }
 
 async function perform(dock: ChromeDock, decision: Decision) {
   const page = dock.page;
-  if (decision.action === "scroll") {
+  if (decision.action === "scroll" || decision.action === "scrollUp") {
     await page.mouse.move(VIEW_W / 2, VIEW_H / 2);
-    await page.mouse.wheel(0, 720);
+    await page.mouse.wheel(0, decision.action === "scrollUp" ? -720 : 720);
     await settle(page);
     return;
   }
@@ -705,7 +726,14 @@ async function perform(dock: ChromeDock, decision: Decision) {
       await settle(page);
       return;
     }
-    await page.keyboard.type(decision.text);
+    const anyInput = page
+      .locator("input:not([type='hidden']):not([type='submit']):not([type='button'])")
+      .first();
+    if ((await anyInput.count()) > 0) {
+      await anyInput.fill(decision.text, { timeout: 5000 });
+    } else {
+      await page.keyboard.type(decision.text);
+    }
     await settle(page);
     return;
   }
@@ -772,9 +800,14 @@ export function setSecret(id: string, secret: string): { ok: true; held: boolean
 }
 
 export async function closeDock(id: string): Promise<{ ok: true } | DockResult> {
-  return enqueue(async () => {
+  let clean: string;
+  try {
+    clean = cleanId(id);
+  } catch (e) {
+    return fail(e);
+  }
+  return enqueueFor(clean, async () => {
     try {
-      const clean = cleanId(id);
       const dock = docks.get(clean);
       if (dock?.kind === "chrome") await dock.context.close().catch(() => undefined);
       docks.delete(clean);
@@ -787,9 +820,14 @@ export async function closeDock(id: string): Promise<{ ok: true } | DockResult> 
 }
 
 export async function viewDock(id: string, homeUrl: string, currentUrl: string): Promise<DockResult> {
-  return enqueue(async () => {
+  let clean: string;
+  try {
+    clean = cleanId(id);
+  } catch (e) {
+    return fail(e);
+  }
+  return enqueueFor(clean, async () => {
     try {
-      const clean = cleanId(id);
       const dock = await ensure(clean, homeUrl, currentUrl);
       const surface = await capture(dock);
       const note = offsiteHold(surface, dock.homeUrl) ? "That left this dock's site." : "";
@@ -808,34 +846,36 @@ export async function runTask(input: {
   task: string;
   memory: string;
 }): Promise<DockResult> {
-  return enqueue(async () => {
+  let clean: string;
+  try {
+    clean = cleanId(input.id);
+  } catch (e) {
+    return fail(e);
+  }
+  return enqueueFor(clean, async () => {
     try {
-      const id = cleanId(input.id);
       const task = input.task.trim().slice(0, 400);
       const memory = input.memory.trim().slice(0, 400);
       if (!task) throw new Error("Say what you want done.");
       takeTaskSlot();
-      pending.delete(id);
-      let dock = await ensure(id, input.homeUrl, input.currentUrl);
+      pending.delete(clean);
+      let dock = await ensure(clean, input.homeUrl, input.currentUrl);
       const steps: Step[] = [];
       let surface = await capture(dock);
       if (surface.challenge) {
         return viewFrom(surface, {
-          vaultHeld: held(id),
+          vaultHeld: held(clean),
           steps: [{ label: "The site is asking for a person." }],
           summary: "Solve the check on the view, then continue.",
           status: "challenge",
         });
       }
       for (let i = 0; i < MAX_MODEL_CALLS; i += 1) {
-        const repeated = (decision: Decision) =>
-          decision.action === "click" &&
-          steps.some((step) => step.label.toLowerCase() === stepLabel(decision).toLowerCase());
         let finish = i === MAX_MODEL_CALLS - 1;
         let decision = await askModel({
           task,
           memory,
-          vaultHeld: held(id),
+          vaultHeld: held(clean),
           surface,
           steps: steps.map((step) => step.label),
           finish,
@@ -858,12 +898,13 @@ export async function runTask(input: {
             reason: "",
           };
         }
-        if (!forcedSearch && repeated(decision)) {
+        const label = stepLabel(decision);
+        if (!forcedSearch && isRepeated(label, steps)) {
           finish = true;
           decision = await askModel({
             task,
             memory,
-            vaultHeld: held(id),
+            vaultHeld: held(clean),
             surface,
             steps: steps.map((step) => step.label),
             finish: true,
@@ -872,41 +913,43 @@ export async function runTask(input: {
         if (!forcedSearch && finish && decision.action !== "done" && decision.action !== "hold") {
           decision = { ...decision, action: "done" };
         }
-        steps.push({ label: stepLabel(decision) });
-        if (decision.action === "done" || finish) {
-          return viewFrom(surface, {
-            vaultHeld: held(id),
-            steps,
-            summary: answerFromPage(decision.summary, steps, surface),
-            status: "ready",
-          });
-        }
+        // Check hold/sensitive before done/finish so sensitive actions on the last
+        // iteration are not silently swallowed.
         if (decision.action === "hold" || isSensitive(decision)) {
+          steps.push({ label: stepLabel(decision) });
           const executable = decision.action !== "hold";
-          if (executable) pending.set(id, decision);
+          if (executable) pending.set(clean, decision);
           return viewFrom(surface, {
-            vaultHeld: held(id),
+            vaultHeld: held(clean),
             steps,
             summary: decision.reason || decision.summary || "Paused.",
             status: surface.challenge ? "challenge" : "hold",
             pendingLabel: executable ? pendingLabel(decision) : null,
           });
         }
+        steps.push({ label: stepLabel(decision) });
+        if (decision.action === "done" || finish) {
+          return viewFrom(surface, {
+            vaultHeld: held(clean),
+            steps,
+            summary: answerFromPage(decision.summary, steps, surface),
+            status: "ready",
+          });
+        }
         if (dock.kind !== "chrome") {
           if (decision.action === "click") {
-            const link = dock.html
-              ? extractHtml(dock.html, dock.url).controls.find((control) =>
-                  control.label.toLowerCase().includes(decision.target.toLowerCase()),
-                )
-              : undefined;
+            if (!dock.extracted) dock.extracted = extractHtml(dock.html, dock.url);
+            const link = dock.extracted.controls.find((control) =>
+              control.label.toLowerCase().includes(decision.target.toLowerCase()),
+            );
             if (link?.href && sameSite(dock.homeUrl, link.href)) {
-              dock = await ensureReader(id, dock.homeUrl, link.href);
+              dock = await ensureReader(clean, dock.homeUrl, link.href);
               surface = await capture(dock);
               continue;
             }
           }
           return viewFrom(surface, {
-            vaultHeld: held(id),
+            vaultHeld: held(clean),
             steps: [...steps, { label: "This host is reading the page, not clicking through Chrome." }],
             summary: decision.summary || "Open this dock where Chrome can run to go further.",
             status: "hold",
@@ -916,23 +959,28 @@ export async function runTask(input: {
           const tagged = decision.target.match(/^(?:a|button|input|textarea|select):\s*(.+)$/i);
           if (tagged?.[1]) decision = { ...decision, target: tagged[1].trim() };
           await perform(dock, decision);
-        } catch (error) {
-          const message = error instanceof Error ? error.message.split("\n")[0] : "The step failed.";
-          surface = await capture(dock);
-          const answer = await askModel({
-            task,
-            memory,
-            vaultHeld: held(id),
-            surface,
-            steps: [...steps.map((step) => step.label), message],
-            finish: true,
-          });
-          return viewFrom(surface, {
-            vaultHeld: held(id),
-            steps: [...steps, { label: "The click missed. Answered from the page." }],
-            summary: answerFromPage(answer.summary, steps, surface),
-            status: "ready",
-          });
+        } catch {
+          await new Promise((r) => setTimeout(r, 800));
+          try {
+            await perform(dock, decision);
+          } catch (error) {
+            const message = error instanceof Error ? error.message.split("\n")[0] : "The step failed.";
+            surface = await capture(dock);
+            const answer = await askModel({
+              task,
+              memory,
+              vaultHeld: held(clean),
+              surface,
+              steps: [...steps.map((step) => step.label), message],
+              finish: true,
+            });
+            return viewFrom(surface, {
+              vaultHeld: held(clean),
+              steps: [...steps, { label: "The click missed. Answered from the page." }],
+              summary: answerFromPage(answer.summary, steps, surface),
+              status: "ready",
+            });
+          }
         }
         const left = await guardSite(dock);
         if (dock.page.url().includes("#chat")) {
@@ -944,7 +992,7 @@ export async function runTask(input: {
         surface = await capture(dock);
         if (left) {
           return viewFrom(surface, {
-            vaultHeld: held(id),
+            vaultHeld: held(clean),
             steps: [...steps, { label: left }],
             summary: left,
             status: "hold",
@@ -952,7 +1000,7 @@ export async function runTask(input: {
         }
         if (surface.challenge) {
           return viewFrom(surface, {
-            vaultHeld: held(id),
+            vaultHeld: held(clean),
             steps: [...steps, { label: "The site is asking for a person." }],
             summary: "Solve the check on the view, then continue.",
             status: "challenge",
@@ -960,7 +1008,7 @@ export async function runTask(input: {
         }
       }
       return viewFrom(surface, {
-        vaultHeld: held(id),
+        vaultHeld: held(clean),
         steps: [...steps, { label: "Stopped so this task stays short." }],
         summary: "Run again if you want another pass.",
         status: "ready",
@@ -981,19 +1029,24 @@ export async function gesture(input: {
   text?: string;
   href?: string;
 }): Promise<DockResult> {
-  return enqueue(async () => {
+  let clean: string;
+  try {
+    clean = cleanId(input.id);
+  } catch (e) {
+    return fail(e);
+  }
+  return enqueueFor(clean, async () => {
     try {
-      const id = cleanId(input.id);
-      if (input.kind === "dismiss") pending.delete(id);
+      if (input.kind === "dismiss") pending.delete(clean);
       if (input.kind === "refresh") {
-        const existing = docks.get(id);
-        if (existing?.kind === "reader") docks.delete(id);
+        const existing = docks.get(clean);
+        if (existing?.kind === "reader") docks.delete(clean);
       }
-      const dock = await ensure(id, input.homeUrl, input.currentUrl);
+      const dock = await ensure(clean, input.homeUrl, input.currentUrl);
       const steps: Step[] = [];
       if (input.kind === "approve") {
-        const decision = pending.get(id);
-        pending.delete(id);
+        const decision = pending.get(clean);
+        pending.delete(clean);
         if (!decision) throw new Error("Nothing is waiting for approval.");
         if (dock.kind !== "chrome") throw new Error("Approval needs Chrome on this host.");
         await perform(dock, decision);
@@ -1026,15 +1079,14 @@ export async function gesture(input: {
           const read = await readPage(next.toString());
           dock.url = read.finalUrl;
           dock.html = read.html;
+          dock.extracted = undefined;
         }
         steps.push({ label: "Opened the link." });
       }
-      const surface = await capture(dock.kind === "chrome" ? docks.get(id) as ChromeDock : dock);
-      const fresh = docks.get(id) ?? dock;
-      const seen = fresh.kind === "reader" ? readerSurface(fresh) : surface;
-      const status: DockStatus = seen.challenge ? "challenge" : "ready";
-      return viewFrom(seen, {
-        vaultHeld: held(id),
+      const surface = await capture(dock);
+      const status: DockStatus = surface.challenge ? "challenge" : "ready";
+      return viewFrom(surface, {
+        vaultHeld: held(clean),
         steps,
         summary: input.kind === "approve" ? "Approved and done. Run again for the next step." : "",
         status,

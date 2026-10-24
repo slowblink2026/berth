@@ -1,3 +1,10 @@
+const TWO_PART_TLDS = new Set([
+  "co.uk", "co.jp", "co.nz", "co.za", "co.in", "co.kr", "co.id",
+  "com.au", "com.br", "com.mx", "com.ar", "com.sg", "com.hk", "com.cn",
+  "org.uk", "net.uk", "me.uk", "ac.uk", "gov.uk",
+  "gov.au", "edu.au", "net.au",
+]);
+
 export function isPrivateIp(ip: string): boolean {
   const lower = ip.toLowerCase();
   const mapped = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
@@ -26,7 +33,9 @@ export function siteKey(hostname: string): string {
   const host = hostname.toLowerCase().replace(/\.$/, "").replace(/^\[|\]$/g, "");
   const parts = host.split(".").filter(Boolean);
   if (parts.length <= 2) return parts.join(".");
-  return parts.slice(-2).join(".");
+  const last2 = parts.slice(-2).join(".");
+  if (TWO_PART_TLDS.has(last2)) return parts.slice(-3).join(".");
+  return last2;
 }
 
 export function sameSite(a: string, b: string): boolean {
