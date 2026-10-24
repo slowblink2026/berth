@@ -722,6 +722,17 @@ async function perform(dock: ChromeDock, decision: Decision) {
   }
 }
 
+function needsQuery(url: string): boolean {
+  try {
+    const page = new URL(url);
+    const host = page.hostname.toLowerCase();
+    const search = /(^|\.)duckduckgo\.com$/.test(host) || /(^|\.)google\.[a-z.]+$/.test(host);
+    return search && !page.searchParams.get("q");
+  } catch {
+    return false;
+  }
+}
+
 async function guardSite(dock: ChromeDock): Promise<string | null> {
   const url = dock.page.url();
   if (!url.startsWith("http")) return null;
@@ -825,7 +836,21 @@ export async function runTask(input: {
           steps.push({ label: "Left the chat control alone." });
           continue;
         }
-        if (repeated(decision)) {
+        let forcedSearch = false;
+        if (needsQuery(surface.url) && decision.action !== "type") {
+          forcedSearch = true;
+          finish = false;
+          decision = {
+            action: "type",
+            target: "",
+            text: task.replace(/\s+/g, " ").trim().slice(0, 180),
+            useVault: false,
+            sensitive: false,
+            summary: "",
+            reason: "",
+          };
+        }
+        if (!forcedSearch && repeated(decision)) {
           finish = true;
           decision = await askModel({
             task,
@@ -836,7 +861,7 @@ export async function runTask(input: {
             finish: true,
           });
         }
-        if (finish && decision.action !== "done" && decision.action !== "hold") {
+        if (!forcedSearch && finish && decision.action !== "done" && decision.action !== "hold") {
           decision = { ...decision, action: "done" };
         }
         steps.push({ label: stepLabel(decision) });
