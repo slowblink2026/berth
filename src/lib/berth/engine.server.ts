@@ -543,7 +543,7 @@ async function askModel(input: {
         "If the answer is already on screen, use done and put it in summary. Do not click just to look busy.",
         "Never repeat a step that is already listed.",
         "If the goal needs another page, a menu, search, or a banner out of the way, click, scroll, or type. Do not wait for the user to say click.",
-        "You may search and follow links onto other public sites when that serves the task. Prefer the official site. Once the answer is on screen, use done.",
+        "To search, use action type and put the query in text. Do not open Chat, Ask AI, or voice chat.",
         "Do not guess personal facts. Do not type a name, passport number, date of birth, address, or card number unless that exact fact is written in the task.",
         input.finish
           ? "No more actions. action must be done. summary answers the task from the visible page. Do not claim a click."
@@ -696,6 +696,13 @@ async function perform(dock: ChromeDock, decision: Decision) {
         return;
       }
     }
+    const search = page.locator("input[name='q'], input[type='search'], textarea[name='q']").first();
+    if ((await search.count()) > 0) {
+      await search.fill(decision.text, { timeout: 5000 });
+      await search.press("Enter");
+      await settle(page);
+      return;
+    }
     await page.keyboard.type(decision.text);
     await settle(page);
     return;
@@ -814,6 +821,10 @@ export async function runTask(input: {
           steps: steps.map((step) => step.label),
           finish,
         });
+        if (decision.action === "click" && /chat|ask ai|voice/i.test(decision.target)) {
+          steps.push({ label: "Left the chat control alone." });
+          continue;
+        }
         if (repeated(decision)) {
           finish = true;
           decision = await askModel({
@@ -891,6 +902,12 @@ export async function runTask(input: {
           });
         }
         const left = await guardSite(dock);
+        if (dock.page.url().includes("#chat")) {
+          await dock.page.goBack({ timeout: 8000 }).catch(() => undefined);
+          surface = await capture(dock);
+          steps.push({ label: "Left the chat page." });
+          continue;
+        }
         surface = await capture(dock);
         if (left) {
           return viewFrom(surface, {
