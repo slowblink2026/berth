@@ -474,6 +474,50 @@ function takeTaskSlot() {
   taskStamps.push(now);
 }
 
+async function complete(
+  call: { url: string; model: string; apiKey: string; timeout: number },
+  headers: Record<string, string>,
+  messages: { role: string; content: string }[],
+  jsonMode: boolean,
+): Promise<string> {
+  const payload: Record<string, unknown> = {
+    model: call.model,
+    temperature: 0.2,
+    max_tokens: 350,
+    messages,
+  };
+  if (jsonMode) payload.response_format = { type: "json_object" };
+  let response = await fetch(call.url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(call.timeout),
+  });
+  if (!response.ok && jsonMode) {
+    delete payload.response_format;
+    response = await fetch(call.url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(call.timeout),
+    });
+  }
+  if (!response.ok) throw new Error(`The assistant couldn't answer (${response.status}).`);
+  const body = (await response.json()) as { choices?: { message?: { content?: unknown } }[] };
+  const content = body.choices?.[0]?.message?.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part && typeof part === "object" && "text" in part) return String((part as { text?: unknown }).text ?? "");
+        return "";
+      })
+      .join("");
+  }
+  return "";
+}
+
 async function askModel(input: {
   task: string;
   memory: string;
@@ -489,60 +533,62 @@ async function askModel(input: {
     .join("\n");
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (call.apiKey) headers.Authorization = `Bearer ${call.apiKey}`;
-  const response = await fetch(call.url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      model: call.model,
-      temperature: 0.2,
-      max_tokens: 350,
-      messages: [
-        {
-          role: "system",
-          content: [
-            "You operate one website dock. Reply with JSON only, no markdown.",
-            '{"action":"click"|"type"|"scroll"|"press"|"done"|"hold","target":"","text":"","useVault":false,"sensitive":false,"summary":"","reason":""}',
-            "Decide the next step yourself. Reply with one step only.",
-            "If the answer is already on screen, use done and put it in summary. Do not click just to look busy.",
-            "Never repeat a step that is already listed.",
-            "If the goal needs another page, a menu, search, or a banner out of the way, click, scroll, or type. Do not wait for the user to say click.",
-            input.finish
-              ? "No more actions. action must be done. summary is only the labels of the controls visible now, separated by commas. Do not say you clicked anything."
-              : "",
-            "click target is the visible label of a control on this page.",
-            "Never invent or repeat a password. If a login is required and a saved login exists, set useVault true and leave text empty.",
-            "If the page is a human check, use hold.",
-            "If the step would pay, send money, delete, subscribe, or change a password, set sensitive true and use hold.",
-            "Stay on this site.",
-          ].join(" "),
-        },
-        {
-          role: "user",
-          content: [
-            `Task: ${input.task}`,
-            `Steps already taken: ${input.steps.length ? input.steps.join(" ") : "(none)"}`,
-            `Dock note: ${input.memory || "(none)"}`,
-            `Saved login on this host: ${input.vaultHeld ? "yes" : "no"}`,
-            `URL: ${input.surface.url}`,
-            `Title: ${input.surface.title}`,
-            `Visible text:\n${input.surface.text.slice(0, 5000)}`,
-            `Controls:\n${controls || "(none listed)"}`,
-          ].join("\n\n"),
-        },
-      ],
-    }),
-    signal: AbortSignal.timeout(call.timeout),
-  });
-  if (!response.ok) throw new Error(`The assistant couldn't answer (${response.status}).`);
-  const body = (await response.json()) as { choices?: { message?: { content?: string } }[] };
-  const content = body.choices?.[0]?.message?.content ?? "";
-  return parseDecision(content);
+  const messages = [
+    {
+      role: "system",
+      content: [
+        "You operate one website dock. Reply with JSON only, no markdown.",
+        '{"action":"click"|"type"|"scroll"|"press"|"done"|"hold","target":"","text":"","useVault":false,"sensitive":false,"summary":"","reason":""}',
+        "Decide the next step yourself. Reply with one step only.",
+        "If the answer is already on screen, use done and put it in summary. Do not click just to look busy.",
+        "Never repeat a step that is already listed.",
+        "If the goal needs another page, a menu, search, or a banner out of the way, click, scroll, or type. Do not wait for the user to say click.",
+        input.finish
+          ? "No more actions. action must be done. summary is only the labels of the controls visible now, separated by commas. Do not say you clicked anything."
+          : "",
+        "click target is the visible label of a control on this page.",
+        "Never invent or repeat a password. If a login is required and a saved login exists, set useVault true and leave text empty.",
+        "If the page is a human check, use hold.",
+        "If the step would pay, send money, delete, subscribe, or change a password, set sensitive true and use hold.",
+        "Stay on this site.",
+      ].join(" "),
+    },
+    {
+      role: "user",
+      content: [
+        `Task: ${input.task}`,
+        `Steps already taken: ${input.steps.length ? input.steps.join(" ") : "(none)"}`,
+        `Dock note: ${input.memory || "(none)"}`,
+        `Saved login on this host: ${input.vaultHeld ? "yes" : "no"}`,
+        `URL: ${input.surface.url}`,
+        `Title: ${input.surface.title}`,
+        `Visible text:\n${input.surface.text.slice(0, 5000)}`,
+        `Controls:\n${controls || "(none listed)"}`,
+      ].join("\n\n"),
+    },
+  ];
+  const jsonMode = !call.url.includes("api.x.ai");
+  let content = await complete(call, headers, messages, jsonMode);
+  try {
+    return parseDecision(content);
+  } catch {
+    content = await complete(
+      call,
+      headers,
+      [...messages, { role: "user", content: "Reply with one JSON object only. No other words." }],
+      jsonMode,
+    );
+    return parseDecision(content);
+  }
 }
 
 function parseDecision(raw: string): Decision {
   const start = raw.indexOf("{");
   const end = raw.lastIndexOf("}");
-  if (start < 0 || end <= start) throw new Error("The assistant didn't return a step.");
+  if (start < 0 || end <= start) {
+    const said = raw.replace(/\s+/g, " ").trim().slice(0, 160);
+    throw new Error(said ? `The assistant didn't return a step. It said: ${said}` : "The assistant didn't return a step.");
+  }
   const slice = raw.slice(start, end + 1);
   const loosened = slice.replace(/,\s*([}\]])/g, "$1").replace(/"\s+"/g, '","');
   let json: Record<string, unknown> | null = null;
