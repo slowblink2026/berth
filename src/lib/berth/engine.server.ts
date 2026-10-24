@@ -104,7 +104,12 @@ const taskStamps: number[] = [];
 const queues = new Map<string, Promise<unknown>>();
 let chromeFailedAt = 0;
 
-const stepBus = new Map<string, Set<(label: string) => void>>();
+declare global {
+  // eslint-disable-next-line no-var
+  var __berthStepBus: Map<string, Set<(label: string) => void>> | undefined;
+}
+if (!globalThis.__berthStepBus) globalThis.__berthStepBus = new Map();
+const stepBus = globalThis.__berthStepBus;
 
 function emitStep(id: string, label: string) {
   stepBus.get(id)?.forEach((cb) => cb(label));
@@ -966,6 +971,7 @@ export async function runTask(input: {
       const steps: Step[] = [];
       let surface = await capture(dock);
       if (surface.challenge) {
+        emitStep(clean, "The site is asking for a person.");
         return viewFrom(surface, {
           vaultHeld: held(clean),
           steps: [{ label: "The site is asking for a person." }],
