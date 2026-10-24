@@ -495,11 +495,12 @@ async function complete(
   headers: Record<string, string>,
   messages: { role: string; content: string }[],
   jsonMode: boolean,
+  maxTokens = 350,
 ): Promise<string> {
   const payload: Record<string, unknown> = {
     model: call.model,
     temperature: 0.2,
-    max_tokens: 350,
+    max_tokens: maxTokens,
     messages,
   };
   if (jsonMode) payload.response_format = { type: "json_object" };
@@ -602,6 +603,37 @@ async function askModel(input: {
   }
 }
 
+async function answerTask(input: {
+  task: string;
+  surface: Surface;
+  steps: string[];
+}): Promise<string> {
+  const call = modelCall();
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (call.apiKey) headers.Authorization = `Bearer ${call.apiKey}`;
+  const messages = [
+    {
+      role: "system",
+      content:
+        "You are answering a question based on a web page. Write a clear, complete answer in plain prose. " +
+        "Do not mention clicking, navigation, or steps taken. Do not mention cookies or cookie banners. " +
+        "Only answer from information actually visible on the page. If the page lacks enough detail, say so.",
+    },
+    {
+      role: "user",
+      content: [
+        `Task: ${input.task}`,
+        `Steps taken: ${input.steps.join(" → ")}`,
+        `URL: ${input.surface.url}`,
+        `Title: ${input.surface.title}`,
+        `Page text:\n${input.surface.text.slice(0, 6000)}`,
+      ].join("\n\n"),
+    },
+  ];
+  const jsonMode = !call.url.includes("api.x.ai");
+  return complete(call, headers, messages, jsonMode, 800);
+}
+
 function parseDecision(raw: string): Decision {
   const start = raw.indexOf("{");
   const end = raw.lastIndexOf("}");
@@ -681,6 +713,44 @@ function pendingLabel(decision: Decision): string {
 
 function isRepeated(label: string, history: Step[]): boolean {
   return history.filter((s) => s.label.toLowerCase() === label.toLowerCase()).length >= 2;
+}
+
+const COOKIE_RE = /^(reject( all)?|accept( all)?( cookies)?|deny|no( thanks)?|i (agree|accept)|close( cookies)?|dismiss|got it|ok(ay)?|continue without)$/i;
+
+async function dismissCookieBanner(dock: ChromeDock): Promise<boolean> {
+  if (dock.kind !== "chrome") return false;
+  const page = dock.page;
+  try {
+    const reject = page
+      .getByRole("button", { name: /reject( all( cookies)?)?/i })
+      .or(page.getByRole("link", { name: /reject( all( cookies)?)?/i }))
+      .first();
+    if ((await reject.count()) > 0) {
+      await reject.click({ timeout: 3000 });
+      await settle(page);
+      return true;
+    }
+    const accept = page
+      .getByRole("button", { name: /accept( all( cookies)?)?/i })
+      .or(page.getByRole("link", { name: /accept( all( cookies)?)?/i }))
+      .first();
+    if ((await accept.count()) > 0) {
+      await accept.click({ timeout: 3000 });
+      await settle(page);
+      return true;
+    }
+  } catch {
+    // banner not present or not clickable
+  }
+  return false;
+}
+
+function hasCookieBanner(surface: Surface): boolean {
+  const text = surface.text.toLowerCase();
+  return (
+    (text.includes("cookie") || text.includes("cookies")) &&
+    (text.includes("accept") || text.includes("reject") || text.includes("consent"))
+  );
 }
 
 async function settle(page: PWPage) {
@@ -873,6 +943,14 @@ export async function runTask(input: {
           status: "challenge",
         });
       }
+      // Auto-dismiss cookie banners before the task loop
+      if (dock.kind === "chrome" && hasCookieBanner(surface)) {
+        const dismissed = await dismissCookieBanner(dock);
+        if (dismissed) {
+          surface = await capture(dock);
+          steps.push({ label: "Dismissed cookie banner." });
+        }
+      }
       for (let i = 0; i < MAX_MODEL_CALLS; i += 1) {
         let finish = i === MAX_MODEL_CALLS - 1;
         let decision = await askModel({
@@ -932,10 +1010,11 @@ export async function runTask(input: {
         }
         steps.push({ label: stepLabel(decision) });
         if (decision.action === "done" || finish) {
+          const summary = await answerTask({ task, surface, steps: steps.map((s) => s.label) });
           return viewFrom(surface, {
             vaultHeld: held(clean),
             steps,
-            summary: answerFromPage(decision.summary, steps, surface),
+            summary,
             status: "ready",
           });
         }
@@ -994,18 +1073,11 @@ export async function runTask(input: {
         }
         if (clickMissed) {
           surface = await capture(dock);
-          const answer = await askModel({
-            task,
-            memory,
-            vaultHeld: held(clean),
-            surface,
-            steps: [...steps.map((step) => step.label), "The last action missed."],
-            finish: true,
-          });
+          const summary = await answerTask({ task, surface, steps: steps.map((s) => s.label) });
           return viewFrom(surface, {
             vaultHeld: held(clean),
             steps: [...steps, { label: "The action missed. Answered from the page." }],
-            summary: answerFromPage(answer.summary, steps, surface),
+            summary,
             status: "ready",
           });
         }
@@ -1017,6 +1089,14 @@ export async function runTask(input: {
           continue;
         }
         surface = await capture(dock);
+        // Dismiss cookie banners that appear after navigation
+        if (dock.kind === "chrome" && hasCookieBanner(surface)) {
+          const dismissed = await dismissCookieBanner(dock);
+          if (dismissed) {
+            surface = await capture(dock);
+            steps.push({ label: "Dismissed cookie banner." });
+          }
+        }
         if (left) {
           return viewFrom(surface, {
             vaultHeld: held(clean),
@@ -1034,10 +1114,11 @@ export async function runTask(input: {
           });
         }
       }
+      const summary = await answerTask({ task, surface, steps: steps.map((s) => s.label) });
       return viewFrom(surface, {
         vaultHeld: held(clean),
-        steps: [...steps, { label: "Stopped so this task stays short." }],
-        summary: "Run again if you want another pass.",
+        steps: [...steps, { label: "Answered from the page." }],
+        summary,
         status: "ready",
       });
     } catch (error) {
