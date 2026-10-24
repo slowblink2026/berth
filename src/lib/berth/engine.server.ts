@@ -441,6 +441,21 @@ function viewFrom(surface: Surface, extras?: Partial<DockView> & { vaultHeld?: b
   };
 }
 
+function modelCall() {
+  const base = (process.env.LLM_BASE_URL || "https://api.x.ai/v1").replace(/\/+$/, "");
+  const model = process.env.LLM_MODEL || "grok-4.5";
+  const apiKey = process.env.LLM_API_KEY || process.env.XAI_API_KEY || "";
+  const hosted = base.includes("api.x.ai");
+  if (hosted && !apiKey) throw new Error("The assistant isn't available on this host.");
+  const timeout = Number(process.env.LLM_TIMEOUT_MS || (hosted ? 25000 : 120000));
+  return {
+    url: `${base}/chat/completions`,
+    model,
+    apiKey,
+    timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : 120000,
+  };
+}
+
 function takeTaskSlot() {
   const now = Date.now();
   while (taskStamps.length > 0 && now - (taskStamps[0] ?? 0) > TASK_WINDOW_MS) taskStamps.shift();
@@ -456,20 +471,18 @@ async function askModel(input: {
   vaultHeld: boolean;
   surface: Surface;
 }): Promise<Decision> {
-  const apiKey = process.env.XAI_API_KEY;
-  if (!apiKey) throw new Error("The assistant isn't available on this host.");
+  const call = modelCall();
   const controls = input.surface.controls
     .slice(0, 24)
     .map((control) => `- ${control.tag}: ${control.label}`)
     .join("\n");
-  const response = await fetch("https://api.x.ai/v1/chat/completions", {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (call.apiKey) headers.Authorization = `Bearer ${call.apiKey}`;
+  const response = await fetch(call.url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
+    headers,
     body: JSON.stringify({
-      model: "grok-4.5",
+      model: call.model,
       temperature: 0.2,
       max_tokens: 350,
       messages: [
@@ -500,7 +513,7 @@ async function askModel(input: {
         },
       ],
     }),
-    signal: AbortSignal.timeout(25000),
+    signal: AbortSignal.timeout(call.timeout),
   });
   if (!response.ok) throw new Error(`The assistant couldn't answer (${response.status}).`);
   const body = (await response.json()) as { choices?: { message?: { content?: string } }[] };
