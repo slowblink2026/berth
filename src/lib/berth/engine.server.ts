@@ -507,7 +507,7 @@ async function askModel(input: {
             "Never repeat a step that is already listed.",
             "If the goal needs another page, a menu, search, or a banner out of the way, click, scroll, or type. Do not wait for the user to say click.",
             input.finish
-              ? "No more actions. action must be done. summary answers the task from the page as it is now."
+              ? "No more actions. action must be done. summary is only the labels of the controls visible now, separated by commas. Do not say you clicked anything."
               : "",
             "click target is the visible label of a control on this page.",
             "Never invent or repeat a password. If a login is required and a saved login exists, set useVault true and leave text empty.",
@@ -562,6 +562,21 @@ function parseDecision(raw: string): Decision {
 function isSensitive(decision: Decision): boolean {
   if (decision.useVault && decision.action === "type") return false;
   return decision.sensitive || SENSITIVE_RE.test(`${decision.target} ${decision.text} ${decision.reason}`);
+}
+
+function answerFromPage(summary: string, steps: Step[], surface: Surface): string {
+  const labels = [...new Set(surface.controls.map((control) => control.label.trim()).filter(Boolean))].slice(0, 12);
+  const claimed = summary.trim();
+  const mentionsClick = /\bclick/i.test(claimed);
+  const didThatClick = steps.some((step) => {
+    if (!step.label.startsWith("Clicked ")) return false;
+    const target = step.label.slice("Clicked ".length).replace(/\.$/, "").toLowerCase();
+    return target.length > 0 && claimed.toLowerCase().includes(target);
+  });
+  if (!claimed || (mentionsClick && !didThatClick)) {
+    return labels.length ? `Buttons on the page: ${labels.join(", ")}.` : "Done.";
+  }
+  return claimed;
 }
 
 function stepLabel(decision: Decision): string {
@@ -749,7 +764,7 @@ export async function runTask(input: {
           return viewFrom(surface, {
             vaultHeld: held(id),
             steps,
-            summary: decision.summary || "Done.",
+            summary: answerFromPage(decision.summary, steps, surface),
             status: "ready",
           });
         }
