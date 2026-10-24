@@ -104,6 +104,36 @@ const taskStamps: number[] = [];
 const queues = new Map<string, Promise<unknown>>();
 let chromeFailedAt = 0;
 
+const stepBus = new Map<string, Set<(label: string) => void>>();
+
+function emitStep(id: string, label: string) {
+  stepBus.get(id)?.forEach((cb) => cb(label));
+}
+
+export function subscribeSteps(id: string, cb: (label: string) => void): () => void {
+  let subs = stepBus.get(id);
+  if (!subs) {
+    subs = new Set();
+    stepBus.set(id, subs);
+  }
+  subs.add(cb);
+  return () => {
+    subs!.delete(cb);
+    if (!subs!.size) stepBus.delete(id);
+  };
+}
+
+export async function captureScreenshot(id: string): Promise<Buffer | null> {
+  try {
+    const clean = cleanId(id);
+    const dock = docks.get(clean);
+    if (dock?.kind !== "chrome") return null;
+    return await dock.page.screenshot({ type: "jpeg", quality: 46 });
+  } catch {
+    return null;
+  }
+}
+
 const CHROME_ARGS = [
   "--disable-dev-shm-usage",
   "--disable-gpu",
@@ -949,6 +979,7 @@ export async function runTask(input: {
         if (dismissed) {
           surface = await capture(dock);
           steps.push({ label: "Dismissed cookie banner." });
+          emitStep(clean, "Dismissed cookie banner.");
         }
       }
       for (let i = 0; i < MAX_MODEL_CALLS; i += 1) {
@@ -998,6 +1029,7 @@ export async function runTask(input: {
         // iteration are not silently swallowed.
         if (decision.action === "hold" || isSensitive(decision)) {
           steps.push({ label: stepLabel(decision) });
+          emitStep(clean, stepLabel(decision));
           const executable = decision.action !== "hold";
           if (executable) pending.set(clean, decision);
           return viewFrom(surface, {
@@ -1009,6 +1041,7 @@ export async function runTask(input: {
           });
         }
         steps.push({ label: stepLabel(decision) });
+        emitStep(clean, stepLabel(decision));
         if (decision.action === "done" || finish) {
           const summary = await answerTask({ task, surface, steps: steps.map((s) => s.label) });
           return viewFrom(surface, {
@@ -1059,6 +1092,7 @@ export async function runTask(input: {
                   await dock.page.goto(next.toString(), { waitUntil: "domcontentloaded", timeout: 20000 });
                   await settle(dock.page);
                   steps.push({ label: `Navigated to ${decision.target}.` });
+                  emitStep(clean, `Navigated to ${decision.target}.`);
                   clickMissed = false;
                 } catch {
                   clickMissed = true;
@@ -1095,6 +1129,7 @@ export async function runTask(input: {
           if (dismissed) {
             surface = await capture(dock);
             steps.push({ label: "Dismissed cookie banner." });
+            emitStep(clean, "Dismissed cookie banner.");
           }
         }
         if (left) {
