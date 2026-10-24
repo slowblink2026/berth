@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { env } from "@/lib/env.server";
 import type { DockResult } from "@/lib/berth/types";
 
 function dockId(hostname: string) {
@@ -13,9 +14,15 @@ function normalizeUrl(raw: string) {
   return `https://${trimmed}`;
 }
 
-function localRequest(request: Request) {
-  const host = request.headers.get("host") ?? "";
-  return host.startsWith("127.0.0.1:") || host === "127.0.0.1" || host.startsWith("localhost:");
+function authorized(request: Request): boolean {
+  const apiKey = env("BERTH_API_KEY");
+  if (!apiKey) {
+    // No key configured — fall back to localhost-only
+    const host = request.headers.get("host") ?? "";
+    return host.startsWith("127.0.0.1:") || host === "127.0.0.1" || host.startsWith("localhost:");
+  }
+  const auth = request.headers.get("authorization") ?? "";
+  return auth === `Bearer ${apiKey}`;
 }
 
 function reply(result: DockResult) {
@@ -33,8 +40,8 @@ function reply(result: DockResult) {
 }
 
 async function run(request: Request, url: string, task: string) {
-  if (!localRequest(request)) {
-    return Response.json({ ok: false, error: "Curl the VPS at 127.0.0.1, not from the phone." }, { status: 403 });
+  if (!authorized(request)) {
+    return Response.json({ ok: false, error: "Unauthorized." }, { status: 401 });
   }
   const homeUrl = normalizeUrl(url);
   const job = task.trim();
@@ -58,16 +65,54 @@ async function run(request: Request, url: string, task: string) {
   return reply(result);
 }
 
+async function approve(request: Request, url: string) {
+  if (!authorized(request)) {
+    return Response.json({ ok: false, error: "Unauthorized." }, { status: 401 });
+  }
+  const homeUrl = normalizeUrl(url);
+  if (!homeUrl) {
+    return Response.json({ ok: false, error: "Send a url." }, { status: 400 });
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(homeUrl);
+  } catch {
+    return Response.json({ ok: false, error: "That address isn't a usable URL." }, { status: 400 });
+  }
+  const mod = await import("@/lib/berth/engine.server");
+  const result = await mod.gesture({
+    id: dockId(parsed.hostname),
+    homeUrl,
+    currentUrl: homeUrl,
+    kind: "approve",
+  });
+  return reply(result);
+}
+
 export const Route = createFileRoute("/api/task")({
   server: {
     handlers: {
       GET: async ({ request }) => {
         const params = new URL(request.url).searchParams;
+        if (params.get("approve") === "1") {
+          return approve(request, params.get("url") ?? "");
+        }
         return run(request, params.get("url") ?? "", params.get("task") ?? "");
       },
       POST: async ({ request }) => {
-        const body = (await request.json().catch(() => null)) as { url?: unknown; task?: unknown } | null;
-        return run(request, typeof body?.url === "string" ? body.url : "", typeof body?.task === "string" ? body.task : "");
+        const body = (await request.json().catch(() => null)) as {
+          url?: unknown;
+          task?: unknown;
+          approve?: unknown;
+        } | null;
+        if (body?.approve === true) {
+          return approve(request, typeof body?.url === "string" ? body.url : "");
+        }
+        return run(
+          request,
+          typeof body?.url === "string" ? body.url : "",
+          typeof body?.task === "string" ? body.task : "",
+        );
       },
     },
   },
