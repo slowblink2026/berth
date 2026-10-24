@@ -543,6 +543,7 @@ async function askModel(input: {
         "If the answer is already on screen, use done and put it in summary. Do not click just to look busy.",
         "Never repeat a step that is already listed.",
         "If the goal needs another page, a menu, search, or a banner out of the way, click, scroll, or type. Do not wait for the user to say click.",
+        "On a search page, open the official result. Prefer gov.uk over ads or other sites. After leaving the search page, stay on that site.",
         input.finish
           ? "No more actions. action must be done. summary is only the labels of the controls visible now, separated by commas. Do not say you clicked anything."
           : "",
@@ -713,10 +714,24 @@ async function perform(dock: ChromeDock, decision: Decision) {
   }
 }
 
+function isSearchHost(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return /(^|\.)google\.[a-z.]+$/.test(host) || /(^|\.)duckduckgo\.com$/.test(host);
+  } catch {
+    return false;
+  }
+}
+
 async function guardSite(dock: ChromeDock): Promise<string | null> {
   const url = dock.page.url();
   if (!url.startsWith("http")) return null;
   if (sameSite(dock.homeUrl, url)) return null;
+  if (isSearchHost(dock.homeUrl)) {
+    const next = await assertPublicUrl(url);
+    dock.homeUrl = next.origin;
+    return null;
+  }
   await dock.page.goBack({ timeout: 8000 }).catch(() => undefined);
   return "That left this dock's site, so the page was stepped back.";
 }
