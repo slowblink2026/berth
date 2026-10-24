@@ -85,7 +85,8 @@ export function authInvariantWarnings(result) {
 
 /** What `vite build` / `vite preview` will resolve, via the same wrapper. */
 export function buildAuthEnabled(root = projectRoot(), processEnv = process.env) {
-  return authEnabledFromEnvValue(mergeAppEnv(readAppEnv(root), processEnv).VITE_AUTH_ENABLED);
+  const env = mergeAppEnv(readAppEnv(root), processEnv);
+  return authEnabledFromEnvValue(env.VITE_AUTH_ENABLED);
 }
 
 async function main(argv) {
