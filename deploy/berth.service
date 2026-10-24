@@ -1,0 +1,53 @@
+[Unit]
+Description=Berth – site dock panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+WorkingDirectory=__REPO_DIR__
+
+# Load secrets from /etc/berth.env (chmod 600, owned by root).
+EnvironmentFile=/etc/berth.env
+
+# Runtime env — PLAYWRIGHT_BROWSERS_PATH and DISPLAY are set here so they
+# are always present even if /etc/berth.env doesn't override them.
+Environment=PLAYWRIGHT_BROWSERS_PATH=__REPO_DIR__/.local/pw-browsers
+Environment=DISPLAY=:99
+Environment=NODE_ENV=production
+
+# Start a virtual framebuffer on :99, wait for it to be ready, then hand
+# off to the app. A single ExecStart keeps Xvfb and the app in the same
+# process group so systemd cleans both up on stop.
+ExecStart=/bin/bash -c '\
+  rm -f /tmp/.X99-lock; \
+  Xvfb :99 -screen 0 1280x800x24 -nolisten tcp >/tmp/xvfb.log 2>&1 & \
+  XVFB_PID=$!; \
+  for i in $(seq 1 20); do \
+    xdpyinfo -display :99 >/dev/null 2>&1 && break; \
+    sleep 0.2; \
+  done; \
+  npm run dev; \
+  kill $XVFB_PID 2>/dev/null || true'
+
+# Kill the whole process group on stop so Xvfb, Node and Chrome all exit.
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+Restart=on-failure
+RestartSec=5
+# Don't restart more than 5 times in 2 minutes — a bad config shouldn't loop.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+# Harden the service — Chrome needs a real /tmp and /dev/shm.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=false
+ReadWritePaths=__REPO_DIR__ /tmp
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target

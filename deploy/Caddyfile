@@ -1,0 +1,37 @@
+# Berth reverse proxy — Caddy fetches and renews a Let's Encrypt TLS cert
+# automatically as long as {$BERTH_DOMAIN} resolves to this server's IP.
+#
+# Caddy reads environment variables from the unit that starts it, but this
+# file is included from /etc/caddy/Caddyfile by setup.sh. The domain can be
+# set either as an env var or by replacing the placeholder directly.
+
+{$BERTH_DOMAIN:berth.example.com} {
+    # Proxy to the Vite dev server.
+    reverse_proxy 127.0.0.1:8080 {
+        # Pass the real client IP through.
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Real-IP {remote_host}
+
+        # Dev server can take a moment to wake up after restart.
+        transport http {
+            dial_timeout 10s
+        }
+    }
+
+    # Tighten TLS — drop old clients if that's acceptable on your VPS.
+    tls {
+        protocols tls1.2 tls1.3
+    }
+
+    # Basic security headers.
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options SAMEORIGIN
+        Referrer-Policy strict-origin-when-cross-origin
+        -Server
+    }
+
+    # Caddy writes access logs to systemd journal by default.
+    log
+}
