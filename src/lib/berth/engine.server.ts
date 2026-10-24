@@ -637,6 +637,8 @@ function answerFromPage(summary: string, steps: Step[], surface: Surface): strin
     return target.length > 0 && claimed.toLowerCase().includes(target);
   });
   if (!claimed || (mentionsClick && !didThatClick)) {
+    const text = surface.text.replace(/\s+/g, " ").trim().slice(0, 500);
+    if (text.length > 40) return text;
     return labels.length ? `Buttons on the page: ${labels.join(", ")}.` : "Done.";
   }
   return claimed;
