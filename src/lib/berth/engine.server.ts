@@ -103,7 +103,15 @@ const taskStamps: number[] = [];
 let queue: Promise<unknown> = Promise.resolve();
 let chromeFailedAt = 0;
 
-const CHROME_ARGS = ["--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check"];
+const CHROME_ARGS = [
+  "--disable-dev-shm-usage",
+  "--disable-gpu",
+  "--no-first-run",
+  "--no-default-browser-check",
+  ...(typeof process.getuid === "function" && process.getuid() === 0
+    ? ["--no-sandbox", "--disable-setuid-sandbox"]
+    : []),
+];
 const KEYS = new Set(["Enter", "Tab", "Escape", "ArrowDown", "ArrowUp"]);
 const SENSITIVE_RE =
   /\b(pay|purchase|buy now|delete|place order|send money|checkout|transfer|subscribe|change password|reset password)\b/i;
