@@ -8,7 +8,7 @@ import type { DockResult, DockStatus, DockView, Step, Surface, SurfaceControl } 
 const VIEW_W = 1100;
 const VIEW_H = 720;
 const MAX_CHROME = 2;
-const MAX_MODEL_CALLS = 3;
+const MAX_MODEL_CALLS = 5;
 const TASK_WINDOW_MS = 10 * 60 * 1000;
 const TASK_BUDGET = 12;
 
@@ -500,7 +500,9 @@ async function askModel(input: {
           content: [
             "You operate one website dock. Reply with JSON only, no markdown.",
             '{"action":"click"|"type"|"scroll"|"press"|"done"|"hold","target":"","text":"","useVault":false,"sensitive":false,"summary":"","reason":""}',
-            "If the task is to read, summarize, or list what is already visible, use action done and put the answer in summary. Do not click.",
+            "Decide the next step yourself. Reply with one step only.",
+            "If the answer is already on screen, use done and put it in summary. Do not click just to look busy.",
+            "If the goal needs another page, a menu, search, or a banner out of the way, click, scroll, or type. Do not wait for the user to say click.",
             "click target is the visible label of a control on this page.",
             "Never invent or repeat a password. If a login is required and a saved login exists, set useVault true and leave text empty.",
             "If the page is a human check, use hold.",
