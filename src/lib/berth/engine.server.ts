@@ -106,6 +106,7 @@ let chromeFailedAt = 0;
 const CHROME_ARGS = [
   "--disable-dev-shm-usage",
   "--disable-gpu",
+  "--ozone-platform=x11",
   "--no-first-run",
   "--no-default-browser-check",
   ...(typeof process.getuid === "function" && process.getuid() === 0
@@ -290,7 +291,7 @@ async function openChromeContext(id: string): Promise<PWContext> {
       timeout: 20000,
     });
   } catch (error) {
-    console.error("[berth] persistent chrome failed:", error instanceof Error ? error.message : error);
+    console.error("[berth] persistent chrome failed:", error);
     const browser = await chromium.launch({ headless: false, args: CHROME_ARGS, timeout: 20000 });
     return browser.newContext({ viewport: { width: VIEW_W, height: VIEW_H }, colorScheme: "light" });
   }
@@ -331,7 +332,7 @@ async function ensureChrome(id: string, homeUrl: string, currentUrl: string): Pr
     return dock;
   } catch (error) {
     chromeFailedAt = Date.now();
-    console.error("[berth] chrome launch failed:", error instanceof Error ? error.message : error);
+    console.error("[berth] chrome launch failed:", error);
     return null;
   }
 }
