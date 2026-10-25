@@ -15,6 +15,8 @@ const MAX_FORM_MODEL_CALLS = 24;
 const MAX_MISSES = 3;
 // A form task meets more custom controls, so it gets more tries before giving up.
 const MAX_FORM_MISSES = 5;
+// How often the model may be told to pick something else before the task stops.
+const MAX_REPEATS = 3;
 // A results page that is still loading gets a bounded wait rather than a hold.
 const WAIT_MS = 4000;
 const MAX_WAITS = 5;
@@ -1149,6 +1151,7 @@ export async function runTask(input: {
       }
       let misses = 0;
       let waits = 0;
+      let repeats = 0;
       const formTask = needsForm(task);
       const budget = formTask ? MAX_FORM_MODEL_CALLS : MAX_MODEL_CALLS;
       const missBudget = formTask ? MAX_FORM_MISSES : MAX_MISSES;
@@ -1204,17 +1207,32 @@ export async function runTask(input: {
         }
         const label = stepLabel(decision);
         if (!forcedSearch && isRepeated(label, steps)) {
+          repeats += 1;
+          if (repeats <= MAX_REPEATS) {
+            // Repeating a step is not a reason to end a task that still has steps
+            // and misses left. Say it is already tried and ask again.
+            const note = `That step was already tried, so it was skipped: ${label} Something else is needed.`;
+            console.warn(`[berth] ${clean} ${note} url=${surface.url}`);
+            steps.push({ label: note });
+            emitStep(clean, note);
+            continue;
+          }
           finish = true;
-          decision = await askModel({
-            task,
-            memory,
-            vaultHeld: held(clean),
-            surface,
-            steps: steps.map((step) => step.label),
-            finish: true,
-            open: input.open,
-            formTask,
-          });
+          try {
+            decision = await askModel({
+              task,
+              memory,
+              vaultHeld: held(clean),
+              surface,
+              steps: steps.map((step) => step.label),
+              finish: true,
+              open: input.open,
+              formTask,
+            });
+          } catch {
+            // finish means answer from the page, which is what done does.
+            decision = { ...decision, action: "done" };
+          }
         }
         if (!forcedSearch && finish && decision.action !== "done" && decision.action !== "hold") {
           decision = { ...decision, action: "done" };
