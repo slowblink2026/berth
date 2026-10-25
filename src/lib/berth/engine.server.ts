@@ -9,6 +9,7 @@ const VIEW_W = 1100;
 const VIEW_H = 720;
 const MAX_CHROME = 2;
 const MAX_MODEL_CALLS = 12;
+const MAX_MISSES = 3;
 const TASK_WINDOW_MS = 10 * 60 * 1000;
 const TASK_BUDGET = 16;
 
@@ -1047,6 +1048,7 @@ export async function runTask(input: {
           emitStep(clean, "Dismissed cookie banner.");
         }
       }
+      let misses = 0;
       for (let i = 0; i < MAX_MODEL_CALLS; i += 1) {
         let finish = i === MAX_MODEL_CALLS - 1;
         let decision = await askModel({
@@ -1175,8 +1177,15 @@ export async function runTask(input: {
           }
         }
         if (clickMissed) {
-          const missed = `The action missed (${stepLabel(decision)} ${missReason || "no error reported"}). Answered from the page.`;
+          const missed = `The action failed: ${stepLabel(decision)} ${missReason || "no error reported"}. Try a different way.`;
           console.warn(`[berth] ${clean} ${missed} url=${dock.page.url()}`);
+          misses += 1;
+          if (misses < MAX_MISSES) {
+            // Give the model the failure and let it choose again.
+            steps.push({ label: missed });
+            surface = await capture(dock, input.open);
+            continue;
+          }
           surface = await capture(dock, input.open);
           const summary = await answerTask({ task, surface, steps: steps.map((s) => s.label) });
           return viewFrom(surface, {
