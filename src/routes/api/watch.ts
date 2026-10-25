@@ -1,9 +1,13 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { authorized } from "@/lib/berth/auth.server";
 
 export const Route = createFileRoute("/api/watch")({
   server: {
     handlers: {
       GET: async ({ request }) => {
+        if (!authorized(request)) {
+          return Response.json({ ok: false, error: "Unauthorized." }, { status: 401 });
+        }
         const id = new URL(request.url).searchParams.get("id") ?? "";
         if (!id) return new Response("Missing id", { status: 400 });
         const mod = await import("@/lib/berth/engine.server");

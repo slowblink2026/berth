@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { env } from "@/lib/env.server";
+import { authorized } from "@/lib/berth/auth.server";
 import type { DockResult } from "@/lib/berth/types";
 
 function dockId(hostname: string) {
@@ -12,17 +12,6 @@ function normalizeUrl(raw: string) {
   if (!trimmed) return "";
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
   return `https://${trimmed}`;
-}
-
-function authorized(request: Request): boolean {
-  const apiKey = env("BERTH_API_KEY");
-  if (!apiKey) {
-    // No key configured — fall back to localhost-only
-    const host = request.headers.get("host") ?? "";
-    return host.startsWith("127.0.0.1:") || host === "127.0.0.1" || host.startsWith("localhost:");
-  }
-  const auth = request.headers.get("authorization") ?? "";
-  return auth === `Bearer ${apiKey}`;
 }
 
 function reply(result: DockResult) {
