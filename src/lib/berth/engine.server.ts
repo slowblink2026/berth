@@ -9,6 +9,9 @@ const VIEW_W = 1100;
 const VIEW_H = 720;
 const MAX_CHROME = 2;
 const MAX_MODEL_CALLS = 12;
+// A form task spends steps on a route, a date, a direction and a passenger count
+// before any result is on screen, so it gets a larger budget with a hard cap.
+const MAX_FORM_MODEL_CALLS = 24;
 const MAX_MISSES = 3;
 const TASK_WINDOW_MS = 10 * 60 * 1000;
 const TASK_BUDGET = 16;
@@ -1057,8 +1060,9 @@ export async function runTask(input: {
         }
       }
       let misses = 0;
-      for (let i = 0; i < MAX_MODEL_CALLS; i += 1) {
-        let finish = i === MAX_MODEL_CALLS - 1;
+      const budget = needsForm(task) ? MAX_FORM_MODEL_CALLS : MAX_MODEL_CALLS;
+      for (let i = 0; i < budget; i += 1) {
+        let finish = i === budget - 1;
         let decision = await askModel({
           task,
           memory,
@@ -1244,10 +1248,12 @@ export async function runTask(input: {
           });
         }
       }
+      const capped = `Ran out of steps after ${budget} model calls.`;
+      console.warn(`[berth] ${clean} ${capped} url=${dock.kind === "chrome" ? dock.page.url() : dock.url}`);
       const summary = await answerTask({ task, surface, steps: steps.map((s) => s.label) });
       return viewFrom(surface, {
         vaultHeld: held(clean),
-        steps: [...steps, { label: "Answered from the page." }],
+        steps: [...steps, { label: capped }, { label: "Answered from the page." }],
         summary,
         status: "ready",
       });
