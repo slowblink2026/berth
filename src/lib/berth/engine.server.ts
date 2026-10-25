@@ -1168,8 +1168,13 @@ export async function runTask(input: {
           }
         }
         if (clickMissed) {
-          const missed = `The action failed: ${stepLabel(decision)} ${missReason || "no error reported"}. Try a different way.`;
-          console.warn(`[berth] ${clean} ${missed} url=${dock.page.url()}`);
+          // A failure line names the action, the error and the page, so the model
+          // and the log both say what missed and where.
+          const missed =
+            `The action failed: ${stepLabel(decision)} ${missReason || "no error reported"}` +
+            ` at ${dock.page.url()}. Try another way: a different label, the select action for a` +
+            ` dropdown, a full URL as the target, or clickAt on the screenshot if one is shown.`;
+          console.warn(`[berth] ${clean} ${missed}`);
           misses += 1;
           if (misses < MAX_MISSES) {
             // Give the model the failure and let it choose again.
