@@ -707,7 +707,37 @@ async function answerTask(input: {
   return complete(call, headers, messages, jsonMode, 800);
 }
 
-function parseDecision(raw: string): Decision {
+const ACTIONS: Decision["action"][] = [
+  "click",
+  "type",
+  "select",
+  "clickAt",
+  "scroll",
+  "scrollUp",
+  "press",
+  "wait",
+  "done",
+  "hold",
+];
+// Matched on letters only and without case, so clickAt, clickat and click_at all
+// land on the same action — the camelCase names never survived a toLowerCase.
+const ACTION_BY_NAME = new Map<string, Decision["action"]>([
+  ...ACTIONS.map((action) => [action.toLowerCase(), action] as const),
+  ["clickxy", "clickAt"],
+  ["clickpoint", "clickAt"],
+  ["scrolldown", "scroll"],
+  ["scrollback", "scrollUp"],
+  ["waitfor", "wait"],
+  ["navigate", "click"],
+  ["goto", "click"],
+  ["open", "click"],
+  ["pressenter", "press"],
+  ["enter", "press"],
+  ["answer", "done"],
+  ["finish", "done"],
+]);
+
+export function parseDecision(raw: string): Decision {
   const start = raw.indexOf("{");
   const end = raw.lastIndexOf("}");
   if (start < 0 || end <= start) {
@@ -730,12 +760,13 @@ function parseDecision(raw: string): Decision {
     const match = slice.match(new RegExp(`"${key}"\\s*:\\s*"([^"]*)"`, "i"));
     return match?.[1] ?? "";
   };
-  const action = String(json?.action ?? pick("action") ?? "").toLowerCase();
-  if (!["click", "type", "select", "clickAt", "scroll", "scrollUp", "press", "wait", "done", "hold"].includes(action)) {
-    throw new Error("The assistant returned an unknown step.");
+  const named = String(json?.action ?? pick("action") ?? "").replace(/[^a-zA-Z]/g, "").toLowerCase();
+  const action = ACTION_BY_NAME.get(named);
+  if (!action) {
+    throw new Error(`The assistant returned an unknown step: ${named || "(none)"}.`);
   }
   return {
-    action: action as Decision["action"],
+    action,
     target: String(json?.target ?? pick("target")).slice(0, 160),
     text: String(json?.text ?? pick("text")).slice(0, 400),
     useVault: Boolean(json?.useVault),

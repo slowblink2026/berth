@@ -1,6 +1,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { isRepeated, isSensitive, needsForm, needsQuery, parsePoint } from "./engine.server.ts";
+import {
+  isRepeated,
+  isSensitive,
+  needsForm,
+  needsQuery,
+  parseDecision,
+  parsePoint,
+} from "./engine.server.ts";
 
 type Decision = Parameters<typeof isSensitive>[0];
 
@@ -148,5 +155,44 @@ describe("parsePoint", () => {
     assert.throws(() => parsePoint("the date picker"), /x,y in pixels/);
     assert.throws(() => parsePoint("550"), /x,y in pixels/);
     assert.throws(() => parsePoint(""), /x,y in pixels/);
+  });
+});
+
+describe("parseDecision", () => {
+  it("accepts the camelCase actions, which a lowercased compare used to reject", () => {
+    assert.equal(parseDecision('{"action":"clickAt","target":"550,300"}').action, "clickAt");
+    assert.equal(parseDecision('{"action":"clickat","target":"550,300"}').action, "clickAt");
+    assert.equal(parseDecision('{"action":"click_at","target":"550,300"}').action, "clickAt");
+    assert.equal(parseDecision('{"action":"scrollUp"}').action, "scrollUp");
+    assert.equal(parseDecision('{"action":"scrollup"}').action, "scrollUp");
+  });
+
+  it("reads the plain actions and the wait action", () => {
+    assert.equal(parseDecision('{"action":"click","target":"Search"}').action, "click");
+    assert.equal(
+      parseDecision('{"action":"wait","reason":"comparing flight sites"}').action,
+      "wait",
+    );
+    assert.equal(parseDecision('{"action":"DONE","summary":"£40 on easyJet"}').action, "done");
+  });
+
+  it("maps the names a model reaches for instead of the listed ones", () => {
+    assert.equal(
+      parseDecision('{"action":"navigate","target":"https://example.com"}').action,
+      "click",
+    );
+    assert.equal(parseDecision('{"action":"pressEnter"}').action, "press");
+    assert.equal(parseDecision('{"action":"waitFor"}').action, "wait");
+  });
+
+  it("names the action it could not place", () => {
+    assert.throws(() => parseDecision('{"action":"teleport"}'), /unknown step: teleport/);
+    assert.throws(() => parseDecision("no json here"), /didn't return a step/);
+  });
+
+  it("still reads fields out of a reply that is not valid JSON", () => {
+    const decision = parseDecision('{"action":"click", "target":"One way",}');
+    assert.equal(decision.action, "click");
+    assert.equal(decision.target, "One way");
   });
 });
