@@ -13,11 +13,14 @@ const MAX_MODEL_CALLS = 12;
 // before any result is on screen, so it gets a larger budget with a hard cap.
 const MAX_FORM_MODEL_CALLS = 24;
 const MAX_MISSES = 3;
+// A results page that is still loading gets a bounded wait rather than a hold.
+const WAIT_MS = 4000;
+const MAX_WAITS = 5;
 const TASK_WINDOW_MS = 10 * 60 * 1000;
 const TASK_BUDGET = 16;
 
 type Decision = {
-  action: "click" | "type" | "select" | "clickAt" | "scroll" | "scrollUp" | "press" | "done" | "hold";
+  action: "click" | "type" | "select" | "clickAt" | "scroll" | "scrollUp" | "press" | "wait" | "done" | "hold";
   target: string;
   text: string;
   useVault: boolean;
@@ -604,7 +607,7 @@ async function askModel(input: {
       role: "system",
       content: [
         "You operate one website dock. Reply with JSON only, no markdown.",
-        '{"action":"click"|"type"|"select"|"clickAt"|"scroll"|"scrollUp"|"press"|"done"|"hold","target":"","text":"","useVault":false,"sensitive":false,"summary":"","reason":""}',
+        '{"action":"click"|"type"|"select"|"clickAt"|"scroll"|"scrollUp"|"press"|"wait"|"done"|"hold","target":"","text":"","useVault":false,"sensitive":false,"summary":"","reason":""}',
         "Decide the next step yourself. Reply with one step only.",
         "Work out what the task still needs — route, date, direction, how many people, a price, a time — and take the step that fills the biggest gap. Name that gap in reason.",
         "The answer must carry the figures the task asked for, such as a price with its currency or a departure and arrival time. Describing the page is not an answer.",
@@ -629,6 +632,7 @@ async function askModel(input: {
           : "",
         "click target is the visible label only. Never include a tag such as a: or button:.",
         "Never invent or repeat a password. If a login is required and a saved login exists, set useVault true and leave text empty.",
+        "If the page says it is still loading, searching, or comparing, use wait. Do not hold and do not answer from a half-loaded page.",
         "If the page is a human check, use hold.",
         "Searching, choosing a date or a time, and reading a price are never sensitive. Set sensitive true and use hold only when the step itself pays, sends money, confirms a booking that carries someone's details, deletes something, or changes a password.",
         input.open
@@ -727,7 +731,7 @@ function parseDecision(raw: string): Decision {
     return match?.[1] ?? "";
   };
   const action = String(json?.action ?? pick("action") ?? "").toLowerCase();
-  if (!["click", "type", "select", "clickAt", "scroll", "scrollUp", "press", "done", "hold"].includes(action)) {
+  if (!["click", "type", "select", "clickAt", "scroll", "scrollUp", "press", "wait", "done", "hold"].includes(action)) {
     throw new Error("The assistant returned an unknown step.");
   }
   return {
@@ -768,6 +772,7 @@ function answerFromPage(summary: string, steps: Step[], surface: Surface): strin
 function stepLabel(decision: Decision): string {
   if (decision.action === "done") return "Answered from the page.";
   if (decision.action === "hold") return decision.reason || "Paused for you.";
+  if (decision.action === "wait") return "Waited for the page to finish loading.";
   if (decision.action === "scroll") return "Scrolled down the page.";
   if (decision.action === "scrollUp") return "Scrolled up the page.";
   if (decision.action === "press") return `Pressed ${KEYS.has(decision.target) ? decision.target : "Enter"}.`;
@@ -1080,6 +1085,7 @@ export async function runTask(input: {
         }
       }
       let misses = 0;
+      let waits = 0;
       const budget = needsForm(task) ? MAX_FORM_MODEL_CALLS : MAX_MODEL_CALLS;
       for (let i = 0; i < budget; i += 1) {
         let finish = i === budget - 1;
@@ -1142,6 +1148,23 @@ export async function runTask(input: {
             status: surface.challenge ? "challenge" : "hold",
             pendingLabel: executable ? pendingLabel(decision) : null,
           });
+        }
+        if (decision.action === "wait" && !finish) {
+          if (waits >= MAX_WAITS) {
+            const label = `Stopped waiting after ${(MAX_WAITS * WAIT_MS) / 1000}s.`;
+            console.warn(`[berth] ${clean} ${label} url=${surface.url}`);
+            steps.push({ label });
+            emitStep(clean, label);
+            decision = { ...decision, action: "done" };
+          } else {
+            waits += 1;
+            const label = `Waited ${(waits * WAIT_MS) / 1000}s for the page to finish loading.`;
+            steps.push({ label });
+            emitStep(clean, label);
+            await new Promise((r) => setTimeout(r, WAIT_MS));
+            surface = await capture(dock, input.open);
+            continue;
+          }
         }
         steps.push({ label: stepLabel(decision) });
         emitStep(clean, stepLabel(decision));
