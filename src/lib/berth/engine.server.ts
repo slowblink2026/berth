@@ -13,7 +13,7 @@ const TASK_WINDOW_MS = 10 * 60 * 1000;
 const TASK_BUDGET = 16;
 
 type Decision = {
-  action: "click" | "type" | "scroll" | "scrollUp" | "press" | "done" | "hold";
+  action: "click" | "type" | "select" | "clickAt" | "scroll" | "scrollUp" | "press" | "done" | "hold";
   target: string;
   text: string;
   useVault: boolean;
@@ -27,6 +27,7 @@ type PWLocator = {
   first(): PWLocator;
   click(opts?: { timeout: number }): Promise<void>;
   fill(value: string, opts?: { timeout: number }): Promise<void>;
+  selectOption(option: { label: string }, opts?: { timeout: number }): Promise<unknown>;
   count(): Promise<number>;
 };
 
@@ -607,8 +608,12 @@ async function askModel(input: {
       role: "system",
       content: [
         "You operate one website dock. Reply with JSON only, no markdown.",
-        '{"action":"click"|"type"|"scroll"|"scrollUp"|"press"|"done"|"hold","target":"","text":"","useVault":false,"sensitive":false,"summary":"","reason":""}',
+        '{"action":"click"|"type"|"select"|"clickAt"|"scroll"|"scrollUp"|"press"|"done"|"hold","target":"","text":"","useVault":false,"sensitive":false,"summary":"","reason":""}',
         "Decide the next step yourself. Reply with one step only.",
+        "select picks an option from a dropdown: target is the dropdown's label, text is the option to choose.",
+        input.surface.image && call.vision
+          ? "clickAt clicks a point: target is 'x,y' in pixels of the screenshot, which is 1100 by 720. Use it for custom widgets such as date pickers and time lists that have no usable label."
+          : "Use click, type, or select for controls. Do not use clickAt.",
         "If the answer is already on screen, use done and put it in summary. Do not click just to look busy.",
         "Never repeat a step that is already listed.",
         "If the goal needs another page, a menu, search, or a banner out of the way, click, scroll, or type. Do not wait for the user to say click.",
@@ -719,7 +724,7 @@ function parseDecision(raw: string): Decision {
     return match?.[1] ?? "";
   };
   const action = String(json?.action ?? pick("action") ?? "").toLowerCase();
-  if (!["click", "type", "scroll", "scrollUp", "press", "done", "hold"].includes(action)) {
+  if (!["click", "type", "select", "clickAt", "scroll", "scrollUp", "press", "done", "hold"].includes(action)) {
     throw new Error("The assistant returned an unknown step.");
   }
   return {
@@ -763,6 +768,8 @@ function stepLabel(decision: Decision): string {
   if (decision.action === "press") return `Pressed ${KEYS.has(decision.target) ? decision.target : "Enter"}.`;
   if (decision.action === "type" && decision.useVault) return "Used the saved login.";
   if (decision.action === "type") return decision.target ? `Typed into ${decision.target}.` : "Typed into the page.";
+  if (decision.action === "select") return `Chose ${decision.text} in ${decision.target || "the menu"}.`;
+  if (decision.action === "clickAt") return `Clicked at ${decision.target}.`;
   return decision.target ? `Clicked ${decision.target}.` : "Clicked the page.";
 }
 
@@ -867,6 +874,22 @@ async function perform(dock: ChromeDock, decision: Decision) {
     } else {
       await page.keyboard.type(decision.text);
     }
+    await settle(page);
+    return;
+  }
+  if (decision.action === "clickAt") {
+    // Coordinates are pixels in the screenshot, which is the viewport size.
+    const [x, y] = decision.target.split(",").map((part) => Number(part.trim()));
+    if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error("The click needs x,y in pixels.");
+    await page.mouse.click(Math.min(VIEW_W - 1, Math.max(0, x ?? 0)), Math.min(VIEW_H - 1, Math.max(0, y ?? 0)));
+    await settle(page);
+    return;
+  }
+  if (decision.action === "select") {
+    const name = decision.target.trim();
+    if (!name) throw new Error("The assistant didn't name a menu.");
+    const menu = page.getByLabel(name).or(page.getByRole("combobox", { name })).first();
+    await menu.selectOption({ label: decision.text }, { timeout: 5000 });
     await settle(page);
     return;
   }
