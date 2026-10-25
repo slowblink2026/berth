@@ -881,7 +881,9 @@ function needsQuery(url: string): boolean {
     const page = new URL(url);
     const host = page.hostname.toLowerCase();
     const search = /(^|\.)duckduckgo\.com$/.test(host) || /(^|\.)google\.[a-z.]+$/.test(host);
-    return search && !page.searchParams.get("q");
+    // Only the bare search home needs a query. Other pages on these hosts (Google Flights, Maps)
+    // have no ?q= either and must not be forced into a search box.
+    return search && page.pathname === "/" && !page.searchParams.get("q");
   } catch {
     return false;
   }
