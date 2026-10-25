@@ -581,6 +581,7 @@ async function askModel(input: {
   steps: string[];
   finish?: boolean;
   open?: boolean;
+  formTask?: boolean;
 }): Promise<Decision> {
   const call = modelCall();
   const controls = input.surface.controls
@@ -601,6 +602,10 @@ async function askModel(input: {
           ? "clickAt clicks a point: target is 'x,y' in pixels of the screenshot, which is 1100 by 720. Use it for custom widgets such as date pickers and time lists that have no usable label."
           : "Use click, type, or select for controls. Do not use clickAt.",
         "If the answer is already on screen, use done and put it in summary. Do not click just to look busy.",
+        "A landing page, a route list, or a page of adverts is not an answer. If the page shows no prices, times, or results, fill in its search form or go to its results page before answering.",
+        input.formTask
+          ? "Results pages follow shapes you can adapt, for example google.com/travel/flights?q=flights%20from%20LHR%20to%20CDG%20on%202026-11-15, kayak.com/flights/LON-PAR/2026-11-15, skyscanner.net/transport/flights/lon/par/261115/, thetrainline.com/book/results?origin=london&destination=manchester&outwardDate=2026-11-15T09:00:00, nationalrail.co.uk. A shape is a guess, so click it as a full URL, then check the page really lists prices or times and use the site's own search form if it does not."
+          : "",
         "Never repeat a step that is already listed.",
         "If the goal needs another page, a menu, search, or a banner out of the way, click, scroll, or type. Do not wait for the user to say click.",
         "Controls show '→ URL' when a link has a known address. To follow one reliably, use click with the full URL as target instead of the label.",
@@ -907,6 +912,16 @@ async function perform(dock: ChromeDock, decision: Decision) {
   }
 }
 
+// A task that has to be filled into a search form — a route, a date, a number of
+// people — needs more steps than reading one page, and it is the kind of task that
+// lands on a marketing page instead of results.
+const FORM_TASK_RE =
+  /\b(flight|flights|fly|airline|one[- ]way|return|train|trains|rail|coach|ferry|ticket|tickets|fare|fares|timetable|departures?|arrivals?|hotel|hostel|room|rooms|car hire|car rental|book|booking|from\s+\S+\s+to\s+\S+)\b/i;
+
+export function needsForm(task: string): boolean {
+  return FORM_TASK_RE.test(task);
+}
+
 function needsQuery(url: string): boolean {
   try {
     const page = new URL(url);
@@ -1050,6 +1065,7 @@ export async function runTask(input: {
           steps: steps.map((step) => step.label),
           finish,
           open: input.open,
+          formTask: needsForm(task),
         });
         if (decision.action === "click" && /chat|ask ai|voice/i.test(decision.target)) {
           steps.push({ label: "Left the chat control alone." });
@@ -1080,6 +1096,7 @@ export async function runTask(input: {
             steps: steps.map((step) => step.label),
             finish: true,
             open: input.open,
+            formTask: needsForm(task),
           });
         }
         if (!forcedSearch && finish && decision.action !== "done" && decision.action !== "hold") {
