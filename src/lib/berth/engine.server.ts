@@ -167,8 +167,14 @@ const CHROME_ARGS = [
     : []),
 ];
 const KEYS = new Set(["Enter", "Tab", "Escape", "ArrowDown", "ArrowUp"]);
+// Whole phrases only. Single words such as "pay", "transfer" or "delete" appear
+// in ordinary search results — a train with a transfer at Crewe, a page footer
+// about payment — and used to hold a plain search.
 const SENSITIVE_RE =
-  /\b(pay|purchase|buy now|delete|place order|send money|checkout|transfer|subscribe|change password|reset password)\b/i;
+  /\b(pay now|pay with|make (a )?payment|proceed to (checkout|payment|pay)|go to (checkout|payment)|checkout now|place (the |my )?order|buy now|add to (bag|basket|cart)|complete (the |my )?(booking|purchase|order|payment)|confirm (and )?(pay|payment|purchase|order|booking|book)|book (and pay|now)|send money|transfer (money|funds)|wire transfer|card number|security code|cvv|delete (my |the )?(account|card|booking|everything)|permanently delete|close (my )?account|change (my )?password|reset (my )?password|new password|subscribe now|start (my |a )?(free )?trial|sign up and pay)\b/i;
+// Only a step that commits something is matched against those phrases. Answering,
+// scrolling or holding changes nothing, and its reason often quotes the page.
+const COMMITTING_ACTIONS = new Set<Decision["action"]>(["click", "type", "select", "clickAt", "press"]);
 
 const dnsCache = new Map<string, { ips: string[]; at: number }>();
 const DNS_TTL = 60_000;
@@ -623,7 +629,7 @@ async function askModel(input: {
         "click target is the visible label only. Never include a tag such as a: or button:.",
         "Never invent or repeat a password. If a login is required and a saved login exists, set useVault true and leave text empty.",
         "If the page is a human check, use hold.",
-        "If the step would pay, send money, delete, subscribe, or change a password, set sensitive true and use hold.",
+        "Searching, choosing a date or a time, and reading a price are never sensitive. Set sensitive true and use hold only when the step itself pays, sends money, confirms a booking that carries someone's details, deletes something, or changes a password.",
         input.open
           ? "You may leave the start site for any public site the task needs, such as search results. Once there, stay on the sites that answer the task."
           : "Stay on this site.",
@@ -734,9 +740,11 @@ function parseDecision(raw: string): Decision {
   };
 }
 
-function isSensitive(decision: Decision): boolean {
+export function isSensitive(decision: Decision): boolean {
   if (decision.useVault && decision.action === "type") return false;
-  return decision.sensitive || SENSITIVE_RE.test(`${decision.target} ${decision.text} ${decision.reason}`);
+  if (decision.sensitive) return true;
+  if (!COMMITTING_ACTIONS.has(decision.action)) return false;
+  return SENSITIVE_RE.test(`${decision.target} ${decision.text} ${decision.reason}`);
 }
 
 function answerFromPage(summary: string, steps: Step[], surface: Surface): string {
