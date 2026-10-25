@@ -39,14 +39,18 @@ function reply(result: DockResult) {
   });
 }
 
+// Without a url, a task starts at this search page and may follow results to other public sites.
+const SEARCH_START = "https://duckduckgo.com/";
+
 async function run(request: Request, url: string, task: string) {
   if (!authorized(request)) {
     return Response.json({ ok: false, error: "Unauthorized." }, { status: 401 });
   }
-  const homeUrl = normalizeUrl(url);
+  const given = normalizeUrl(url);
+  const homeUrl = given || SEARCH_START;
   const job = task.trim();
-  if (!homeUrl || !job) {
-    return Response.json({ ok: false, error: "Send a url and a task." }, { status: 400 });
+  if (!job) {
+    return Response.json({ ok: false, error: "Send a task, and optionally a url." }, { status: 400 });
   }
   let parsed: URL;
   try {
@@ -61,6 +65,7 @@ async function run(request: Request, url: string, task: string) {
     currentUrl: homeUrl,
     task: job,
     memory: "",
+    open: !given,
   });
   return reply(result);
 }
@@ -69,10 +74,7 @@ async function approve(request: Request, url: string) {
   if (!authorized(request)) {
     return Response.json({ ok: false, error: "Unauthorized." }, { status: 401 });
   }
-  const homeUrl = normalizeUrl(url);
-  if (!homeUrl) {
-    return Response.json({ ok: false, error: "Send a url." }, { status: 400 });
-  }
+  const homeUrl = normalizeUrl(url) || SEARCH_START;
   let parsed: URL;
   try {
     parsed = new URL(homeUrl);

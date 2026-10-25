@@ -484,10 +484,10 @@ async function captureChrome(dock: ChromeDock): Promise<Surface> {
   };
 }
 
-async function capture(dock: Dock): Promise<Surface> {
+async function capture(dock: Dock, open = false): Promise<Surface> {
   if (dock.kind === "reader") return readerSurface(dock);
   const surface = await captureChrome(dock);
-  if (surface.url.startsWith("http") && !sameSite(dock.homeUrl, surface.url)) {
+  if (!open && surface.url.startsWith("http") && !sameSite(dock.homeUrl, surface.url)) {
     await dock.page.goBack({ timeout: 8000 }).catch(() => undefined);
     const back = await captureChrome(dock);
     return back;
@@ -518,13 +518,19 @@ function modelCall() {
   const hosted = base.includes("api.x.ai");
   if (hosted && !apiKey) throw new Error("The assistant isn't available on this host.");
   const timeout = Number(process.env.LLM_TIMEOUT_MS || (hosted ? 25000 : 120000));
+  // Screenshots go to hosted Grok by default. Set LLM_VISION=1 or 0 to override for other servers.
+  const vision = process.env.LLM_VISION ? process.env.LLM_VISION === "1" : hosted;
   return {
     url: `${base}/chat/completions`,
     model,
     apiKey,
+    vision,
     timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : 120000,
   };
 }
+
+type ContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
+type ChatMessage = { role: string; content: string | ContentPart[] };
 
 function takeTaskSlot() {
   const now = Date.now();
@@ -538,7 +544,7 @@ function takeTaskSlot() {
 async function complete(
   call: { url: string; model: string; apiKey: string; timeout: number },
   headers: Record<string, string>,
-  messages: { role: string; content: string }[],
+  messages: ChatMessage[],
   jsonMode: boolean,
   maxTokens = 350,
 ): Promise<string> {
@@ -587,6 +593,7 @@ async function askModel(input: {
   surface: Surface;
   steps: string[];
   finish?: boolean;
+  open?: boolean;
 }): Promise<Decision> {
   const call = modelCall();
   const controls = input.surface.controls
@@ -595,7 +602,7 @@ async function askModel(input: {
     .join("\n");
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (call.apiKey) headers.Authorization = `Bearer ${call.apiKey}`;
-  const messages = [
+  const messages: ChatMessage[] = [
     {
       role: "system",
       content: [
@@ -616,7 +623,9 @@ async function askModel(input: {
         "Never invent or repeat a password. If a login is required and a saved login exists, set useVault true and leave text empty.",
         "If the page is a human check, use hold.",
         "If the step would pay, send money, delete, subscribe, or change a password, set sensitive true and use hold.",
-        "Stay on this site.",
+        input.open
+          ? "You may leave the start site for any public site the task needs, such as search results. Once there, stay on the sites that answer the task."
+          : "Stay on this site.",
       ].join(" "),
     },
     {
@@ -633,6 +642,13 @@ async function askModel(input: {
       ].join("\n\n"),
     },
   ];
+  const user = messages[1];
+  if (call.vision && input.surface.image && user && typeof user.content === "string") {
+    user.content = [
+      { type: "text", text: user.content },
+      { type: "image_url", image_url: { url: input.surface.image } },
+    ];
+  }
   const jsonMode = !call.url.includes("api.x.ai");
   let content = await complete(call, headers, messages, jsonMode);
   try {
@@ -965,6 +981,7 @@ export async function runTask(input: {
   currentUrl: string;
   task: string;
   memory: string;
+  open?: boolean;
 }): Promise<DockResult> {
   let clean: string;
   try {
@@ -981,8 +998,14 @@ export async function runTask(input: {
       pending.delete(clean);
       globalThis.__berthActiveDockId = clean;
       let dock = await ensure(clean, input.homeUrl, input.currentUrl);
+      // An open-web task starts at its search page, even if this dock was left somewhere else.
+      const onStart = dock.kind === "chrome" && new URL(dock.page.url() || "about:blank").host === new URL(input.currentUrl).host;
+      if (input.open && dock.kind === "chrome" && !onStart) {
+        await dock.page.goto(input.currentUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+        await settle(dock.page);
+      }
       const steps: Step[] = [];
-      let surface = await capture(dock);
+      let surface = await capture(dock, input.open);
       if (surface.challenge) {
         emitStep(clean, "The site is asking for a person.");
         return viewFrom(surface, {
@@ -996,7 +1019,7 @@ export async function runTask(input: {
       if (dock.kind === "chrome" && hasCookieBanner(surface)) {
         const dismissed = await dismissCookieBanner(dock);
         if (dismissed) {
-          surface = await capture(dock);
+          surface = await capture(dock, input.open);
           steps.push({ label: "Dismissed cookie banner." });
           emitStep(clean, "Dismissed cookie banner.");
         }
@@ -1010,6 +1033,7 @@ export async function runTask(input: {
           surface,
           steps: steps.map((step) => step.label),
           finish,
+          open: input.open,
         });
         if (decision.action === "click" && /chat|ask ai|voice/i.test(decision.target)) {
           steps.push({ label: "Left the chat control alone." });
@@ -1039,6 +1063,7 @@ export async function runTask(input: {
             surface,
             steps: steps.map((step) => step.label),
             finish: true,
+            open: input.open,
           });
         }
         if (!forcedSearch && finish && decision.action !== "done" && decision.action !== "hold") {
@@ -1078,7 +1103,7 @@ export async function runTask(input: {
             );
             if (link?.href && sameSite(dock.homeUrl, link.href)) {
               dock = await ensureReader(clean, dock.homeUrl, link.href);
-              surface = await capture(dock);
+              surface = await capture(dock, input.open);
               continue;
             }
           }
@@ -1125,7 +1150,7 @@ export async function runTask(input: {
           }
         }
         if (clickMissed) {
-          surface = await capture(dock);
+          surface = await capture(dock, input.open);
           const summary = await answerTask({ task, surface, steps: steps.map((s) => s.label) });
           return viewFrom(surface, {
             vaultHeld: held(clean),
@@ -1137,16 +1162,16 @@ export async function runTask(input: {
         const left = await guardSite(dock);
         if (dock.page.url().includes("#chat")) {
           await dock.page.goBack({ timeout: 8000 }).catch(() => undefined);
-          surface = await capture(dock);
+          surface = await capture(dock, input.open);
           steps.push({ label: "Left the chat page." });
           continue;
         }
-        surface = await capture(dock);
+        surface = await capture(dock, input.open);
         // Dismiss cookie banners that appear after navigation
         if (dock.kind === "chrome" && hasCookieBanner(surface)) {
           const dismissed = await dismissCookieBanner(dock);
           if (dismissed) {
-            surface = await capture(dock);
+            surface = await capture(dock, input.open);
             steps.push({ label: "Dismissed cookie banner." });
             emitStep(clean, "Dismissed cookie banner.");
           }
