@@ -13,6 +13,8 @@ const MAX_MODEL_CALLS = 12;
 // before any result is on screen, so it gets a larger budget with a hard cap.
 const MAX_FORM_MODEL_CALLS = 24;
 const MAX_MISSES = 3;
+// A form task meets more custom controls, so it gets more tries before giving up.
+const MAX_FORM_MISSES = 5;
 // A results page that is still loading gets a bounded wait rather than a hold.
 const WAIT_MS = 4000;
 const MAX_WAITS = 5;
@@ -1133,7 +1135,9 @@ export async function runTask(input: {
       }
       let misses = 0;
       let waits = 0;
-      const budget = needsForm(task) ? MAX_FORM_MODEL_CALLS : MAX_MODEL_CALLS;
+      const formTask = needsForm(task);
+      const budget = formTask ? MAX_FORM_MODEL_CALLS : MAX_MODEL_CALLS;
+      const missBudget = formTask ? MAX_FORM_MISSES : MAX_MISSES;
       for (let i = 0; i < budget; i += 1) {
         let finish = i === budget - 1;
         let decision: Decision;
@@ -1146,7 +1150,7 @@ export async function runTask(input: {
             steps: steps.map((step) => step.label),
             finish,
             open: input.open,
-            formTask: needsForm(task),
+            formTask,
           });
         } catch (error) {
           // One unusable reply should not throw away the steps already taken.
@@ -1154,7 +1158,7 @@ export async function runTask(input: {
           const label = `The step was unusable: ${why} at ${surface.url}`;
           console.warn(`[berth] ${clean} ${label}`);
           misses += 1;
-          if (misses < MAX_MISSES) {
+          if (misses < missBudget) {
             steps.push({ label });
             continue;
           }
@@ -1195,7 +1199,7 @@ export async function runTask(input: {
             steps: steps.map((step) => step.label),
             finish: true,
             open: input.open,
-            formTask: needsForm(task),
+            formTask,
           });
         }
         if (!forcedSearch && finish && decision.action !== "done" && decision.action !== "hold") {
@@ -1320,17 +1324,18 @@ export async function runTask(input: {
             ` dropdown, a full URL as the target, or clickAt on the screenshot if one is shown.`;
           console.warn(`[berth] ${clean} ${missed}`);
           misses += 1;
-          if (misses < MAX_MISSES) {
+          if (misses < missBudget) {
             // Give the model the failure and let it choose again.
             steps.push({ label: missed });
             surface = await capture(dock, input.open);
             continue;
           }
           surface = await capture(dock, input.open);
+          console.warn(`[berth] ${clean} Gave up after ${missBudget} failed actions. url=${surface.url}`);
           const summary = await answerTask({ task, surface, steps: steps.map((s) => s.label) });
           return viewFrom(surface, {
             vaultHeld: held(clean),
-            steps: [...steps, { label: missed }],
+            steps: [...steps, { label: missed }, { label: `Gave up after ${missBudget} failed actions.` }],
             summary,
             status: "ready",
           });
