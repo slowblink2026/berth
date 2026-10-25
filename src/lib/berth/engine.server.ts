@@ -424,7 +424,10 @@ async function captureChrome(dock: ChromeDock): Promise<Surface> {
         return rect.width > 2 && rect.height > 2 && style.visibility !== "hidden" && style.display !== "none";
       };
       const found: { tag: string; label: string; href?: string }[] = [];
-      const nodes = document.querySelectorAll("a, button, input, textarea, select, [role='button'], [role='link']");
+      const nodes = document.querySelectorAll(
+        "a, button, input, textarea, select, [role='button'], [role='link']," +
+          " [role='option'], [role='menuitem'], [role='radio'], [role='combobox'], [role='tab']",
+      );
       for (const el of nodes) {
         if (found.length >= 50) break;
         if (!visible(el)) continue;
@@ -891,6 +894,9 @@ async function perform(dock: ChromeDock, decision: Decision) {
     const locator = page
       .getByRole("link", { name })
       .or(page.getByRole("button", { name }))
+      .or(page.getByRole("option", { name }))
+      .or(page.getByRole("menuitem", { name }))
+      .or(page.getByRole("radio", { name }))
       .or(page.getByLabel(name))
       .or(page.getByPlaceholder(name))
       .or(page.getByText(name, { exact: false }))
