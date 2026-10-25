@@ -34,6 +34,7 @@ type Decision = {
 type PWLocator = {
   or(other: PWLocator): PWLocator;
   and(other: PWLocator): PWLocator;
+  boundingBox(): Promise<{ x: number; y: number; width: number; height: number } | null>;
   first(): PWLocator;
   click(opts?: { timeout: number }): Promise<void>;
   fill(value: string, opts?: { timeout: number }): Promise<void>;
@@ -916,8 +917,21 @@ async function perform(dock: ChromeDock, decision: Decision) {
       const typeable = page.locator(
         "input:not([disabled]):not([readonly]), textarea:not([disabled]):not([readonly]), [contenteditable='true']",
       );
-      const enabled = named.and(typeable).first();
-      const field = (await enabled.count()) > 0 ? enabled : named.first();
+      let field = named.and(typeable).first();
+      if ((await field.count()) === 0 && (await named.count()) > 0) {
+        // The only match is disabled, which on a journey planner means the box
+        // opens a panel when its wrapper is clicked. Click where it sits, then
+        // type into whatever takes focus.
+        const box = await named.first().boundingBox().catch(() => null);
+        if (box) {
+          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+          await settle(page);
+        }
+        const focused = page
+          .locator("input:focus, textarea:focus, [contenteditable='true']:focus")
+          .first();
+        field = (await focused.count()) > 0 ? focused : named.first();
+      }
       if ((await field.count()) > 0) {
         await field.fill(decision.text, { timeout: 5000 });
         // Filling a named box does not submit it. On a search home that leaves the
