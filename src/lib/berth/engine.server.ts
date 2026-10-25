@@ -597,6 +597,8 @@ async function askModel(input: {
         "You operate one website dock. Reply with JSON only, no markdown.",
         '{"action":"click"|"type"|"select"|"clickAt"|"scroll"|"scrollUp"|"press"|"done"|"hold","target":"","text":"","useVault":false,"sensitive":false,"summary":"","reason":""}',
         "Decide the next step yourself. Reply with one step only.",
+        "Work out what the task still needs — route, date, direction, how many people, a price, a time — and take the step that fills the biggest gap. Name that gap in reason.",
+        "The answer must carry the figures the task asked for, such as a price with its currency or a departure and arrival time. Describing the page is not an answer.",
         "select picks an option from a dropdown: target is the dropdown's label, text is the option to choose.",
         input.surface.image && call.vision
           ? "clickAt clicks a point: target is 'x,y' in pixels of the screenshot, which is 1100 by 720. Use it for custom widgets such as date pickers and time lists that have no usable label."
