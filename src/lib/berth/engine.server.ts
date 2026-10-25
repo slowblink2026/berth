@@ -1138,6 +1138,7 @@ export async function runTask(input: {
           });
         }
         let clickMissed = false;
+        let missReason = "";
         try {
           const tagged = decision.target.match(/^(?:a|button|input|textarea|select):\s*(.+)$/i);
           if (tagged?.[1]) decision = { ...decision, target: tagged[1].trim() };
@@ -1146,7 +1147,8 @@ export async function runTask(input: {
           await new Promise((r) => setTimeout(r, 800));
           try {
             await perform(dock, decision);
-          } catch {
+          } catch (error) {
+            missReason = error instanceof Error ? error.message.replace(/\s+/g, " ").slice(0, 200) : String(error);
             if (decision.action === "click") {
               // Try href navigation before giving up
               const target = decision.target.toLowerCase();
@@ -1173,11 +1175,13 @@ export async function runTask(input: {
           }
         }
         if (clickMissed) {
+          const missed = `The action missed (${stepLabel(decision)} ${missReason || "no error reported"}). Answered from the page.`;
+          console.warn(`[berth] ${clean} ${missed} url=${dock.page.url()}`);
           surface = await capture(dock, input.open);
           const summary = await answerTask({ task, surface, steps: steps.map((s) => s.label) });
           return viewFrom(surface, {
             vaultHeld: held(clean),
-            steps: [...steps, { label: "The action missed. Answered from the page." }],
+            steps: [...steps, { label: missed }],
             summary,
             status: "ready",
           });
