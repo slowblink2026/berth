@@ -1300,6 +1300,17 @@ export async function runTask(input: {
             }
           }
         }
+        if (clickMissed && decision.action === "click" && COOKIE_RE.test(decision.target.trim())) {
+          // The engine dismisses banners itself, so the model's own click can land
+          // after the banner is gone. That is not a miss worth spending.
+          surface = await capture(dock, input.open);
+          if (!hasCookieBanner(surface)) {
+            const label = "The cookie banner was already gone.";
+            steps.push({ label });
+            emitStep(clean, label);
+            continue;
+          }
+        }
         if (clickMissed) {
           // A failure line names the action, the error and the page, so the model
           // and the log both say what missed and where.
