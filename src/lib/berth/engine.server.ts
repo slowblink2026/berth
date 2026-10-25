@@ -644,6 +644,7 @@ async function askModel(input: {
       role: "user",
       content: [
         `Task: ${input.task}`,
+        `Today: ${dateHint(new Date())}. Work out any date the task gives as a day or a word, such as tomorrow or next Friday, from this one.`,
         `Steps already taken: ${input.steps.length ? input.steps.join(" ") : "(none)"}`,
         `Dock note: ${input.memory || "(none)"}`,
         `Saved login on this host: ${input.vaultHeld ? "yes" : "no"}`,
@@ -978,6 +979,13 @@ async function perform(dock: ChromeDock, decision: Decision) {
 // lands on a marketing page instead of results.
 const FORM_TASK_RE =
   /\b(flight|flights|fly|airline|one[- ]way|return|train|trains|rail|coach|ferry|ticket|tickets|fare|fares|timetable|departures?|arrivals?|hotel|hostel|room|rooms|car hire|car rental|book|booking|from\s+\S+\s+to\s+\S+)\b/i;
+
+// The model has no clock, so "tomorrow" and "next Friday" were guesses — a live
+// train run searched today's date for a task that asked for tomorrow.
+export function dateHint(now: Date): string {
+  const day = now.toLocaleDateString("en-GB", { weekday: "long", timeZone: "UTC" });
+  return `${now.toISOString().slice(0, 10)} (${day}, UTC)`;
+}
 
 export function needsForm(task: string): boolean {
   return FORM_TASK_RE.test(task);

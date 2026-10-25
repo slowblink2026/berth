@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  dateHint,
   isRepeated,
   isSensitive,
   needsForm,
@@ -194,5 +195,17 @@ describe("parseDecision", () => {
     const decision = parseDecision('{"action":"click", "target":"One way",}');
     assert.equal(decision.action, "click");
     assert.equal(decision.target, "One way");
+  });
+});
+
+describe("dateHint", () => {
+  it("gives the date and the weekday a relative date is counted from", () => {
+    assert.equal(dateHint(new Date("2026-10-25T22:40:00Z")), "2026-10-25 (Sunday, UTC)");
+    assert.equal(dateHint(new Date("2026-11-15T00:00:00Z")), "2026-11-15 (Sunday, UTC)");
+  });
+
+  it("reads the day in UTC, not in the host's zone", () => {
+    assert.equal(dateHint(new Date("2026-10-25T23:30:00Z")), "2026-10-25 (Sunday, UTC)");
+    assert.equal(dateHint(new Date("2026-10-26T00:30:00Z")), "2026-10-26 (Monday, UTC)");
   });
 });
