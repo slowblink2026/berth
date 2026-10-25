@@ -622,6 +622,7 @@ async function askModel(input: {
         "Controls show '→ URL' when a link has a known address. To follow one reliably, use click with the full URL as target instead of the label.",
         "Use scroll to reveal content below the fold. Use scrollUp to go back up if you overshot.",
         "To search, use action type and put the query in text. Do not open Chat, Ask AI, or voice chat.",
+        "Typing fills a box, it does not submit it. After typing into a form field, press Enter or click the search button before expecting the page to change.",
         "Do not guess personal facts. Do not type a name, passport number, date of birth, address, or card number unless that exact fact is written in the task.",
         input.finish
           ? "No more actions. action must be done. summary answers the task from the visible page. Do not claim a click."
@@ -872,6 +873,9 @@ async function perform(dock: ChromeDock, decision: Decision) {
       const field = page.getByLabel(target).or(page.getByPlaceholder(target)).first();
       if ((await field.count()) > 0) {
         await field.fill(decision.text, { timeout: 5000 });
+        // Filling a named box does not submit it. On a search home that leaves the
+        // page exactly as it was, so the next step types the same query again.
+        if (needsQuery(page.url())) await field.press("Enter");
         await settle(page);
         return;
       }
