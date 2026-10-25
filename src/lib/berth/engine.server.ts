@@ -220,26 +220,6 @@ async function assertPublicUrl(raw: string): Promise<URL> {
   return url;
 }
 
-function looksLikeChallenge(title: string, text: string, url: string): boolean {
-  const head = `${title}\n${url}`.toLowerCase();
-  if (
-    head.includes("just a moment") ||
-    head.includes("attention required") ||
-    head.includes("cdn-cgi/challenge") ||
-    head.includes("captcha")
-  ) {
-    return true;
-  }
-  if (text.length > 1800) return false;
-  const body = text.toLowerCase();
-  return (
-    body.includes("verify you are human") ||
-    body.includes("verify you're human") ||
-    body.includes("unusual traffic") ||
-    body.includes("are you a robot")
-  );
-}
-
 function decode(value: string): string {
   return value
     .replace(/&nbsp;/gi, " ")
