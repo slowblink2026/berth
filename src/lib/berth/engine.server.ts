@@ -31,6 +31,7 @@ type Decision = {
 
 type PWLocator = {
   or(other: PWLocator): PWLocator;
+  and(other: PWLocator): PWLocator;
   first(): PWLocator;
   click(opts?: { timeout: number }): Promise<void>;
   fill(value: string, opts?: { timeout: number }): Promise<void>;
@@ -907,7 +908,14 @@ async function perform(dock: ChromeDock, decision: Decision) {
     }
     const target = decision.target.trim();
     if (target) {
-      const field = page.getByLabel(target).or(page.getByPlaceholder(target)).first();
+      const named = page.getByLabel(target).or(page.getByPlaceholder(target));
+      // Some journey planners carry a disabled mirror of the real box, and it comes
+      // first in the DOM, so fill() timed out on a field nobody can type into.
+      const typeable = page.locator(
+        "input:not([disabled]):not([readonly]), textarea:not([disabled]):not([readonly]), [contenteditable='true']",
+      );
+      const enabled = named.and(typeable).first();
+      const field = (await enabled.count()) > 0 ? enabled : named.first();
       if ((await field.count()) > 0) {
         await field.fill(decision.text, { timeout: 5000 });
         // Filling a named box does not submit it. On a search home that leaves the
