@@ -2,7 +2,7 @@ import { lookup } from "node:dns/promises";
 import { mkdir } from "node:fs/promises";
 import { isIP } from "node:net";
 import path from "node:path";
-import { isPrivateIp, sameSite } from "@/lib/berth/net";
+import { isPrivateIp, sameSite } from "./net.ts";
 import type { DockResult, DockStatus, DockView, Step, Surface, SurfaceControl } from "@/lib/berth/types";
 
 const VIEW_W = 1100;
@@ -783,7 +783,7 @@ function pendingLabel(decision: Decision): string {
   return `This would ${decision.action} ${decision.target || "the page"}. Approve it, or leave it.`;
 }
 
-function isRepeated(label: string, history: Step[]): boolean {
+export function isRepeated(label: string, history: Step[]): boolean {
   const same = label.toLowerCase();
   // A step that already failed counts as tried, so it is not retried.
   if (history.some((s) => s.label.startsWith("The action failed: ") && s.label.toLowerCase().includes(same))) return true;
@@ -826,6 +826,16 @@ function hasCookieBanner(surface: Surface): boolean {
     (text.includes("cookie") || text.includes("cookies")) &&
     (text.includes("accept") || text.includes("reject") || text.includes("consent"))
   );
+}
+
+// clickAt coordinates are pixels in the screenshot, which is the viewport size.
+export function parsePoint(target: string): { x: number; y: number } {
+  const [x, y] = target.split(",").map((part) => Number(part.trim()));
+  if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error("The click needs x,y in pixels.");
+  return {
+    x: Math.min(VIEW_W - 1, Math.max(0, x ?? 0)),
+    y: Math.min(VIEW_H - 1, Math.max(0, y ?? 0)),
+  };
 }
 
 async function settle(page: PWPage) {
@@ -885,10 +895,8 @@ async function perform(dock: ChromeDock, decision: Decision) {
     return;
   }
   if (decision.action === "clickAt") {
-    // Coordinates are pixels in the screenshot, which is the viewport size.
-    const [x, y] = decision.target.split(",").map((part) => Number(part.trim()));
-    if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error("The click needs x,y in pixels.");
-    await page.mouse.click(Math.min(VIEW_W - 1, Math.max(0, x ?? 0)), Math.min(VIEW_H - 1, Math.max(0, y ?? 0)));
+    const point = parsePoint(decision.target);
+    await page.mouse.click(point.x, point.y);
     await settle(page);
     return;
   }
@@ -935,7 +943,7 @@ export function needsForm(task: string): boolean {
   return FORM_TASK_RE.test(task);
 }
 
-function needsQuery(url: string): boolean {
+export function needsQuery(url: string): boolean {
   try {
     const page = new URL(url);
     const host = page.hostname.toLowerCase();
