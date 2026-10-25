@@ -781,7 +781,10 @@ function pendingLabel(decision: Decision): string {
 }
 
 function isRepeated(label: string, history: Step[]): boolean {
-  return history.filter((s) => s.label.toLowerCase() === label.toLowerCase()).length >= 2;
+  const same = label.toLowerCase();
+  // A step that already failed counts as tried, so it is not retried.
+  if (history.some((s) => s.label.startsWith("The action failed: ") && s.label.toLowerCase().includes(same))) return true;
+  return history.filter((s) => s.label.toLowerCase() === same).length >= 2;
 }
 
 const COOKIE_RE = /^(reject( all)?|accept( all)?( cookies)?|deny|no( thanks)?|i (agree|accept)|close( cookies)?|dismiss|got it|ok(ay)?|continue without)$/i;
