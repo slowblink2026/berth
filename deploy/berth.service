@@ -31,8 +31,10 @@ ExecStart=/bin/bash -c '\
   npm run dev; \
   kill $XVFB_PID 2>/dev/null || true'
 
-# Kill the whole process group on stop so Xvfb, Node and Chrome all exit.
-KillMode=process
+# Kill everything in the cgroup on stop. With KillMode=process systemd signals
+# only the wrapper bash, so npm, vite and Chrome survived a restart and kept
+# serving the old code on port 8080 — the next start then failed to bind.
+KillMode=control-group
 KillSignal=SIGTERM
 TimeoutStopSec=15
 
