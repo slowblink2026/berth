@@ -28,7 +28,9 @@ type PWLocator = {
   first(): PWLocator;
   click(opts?: { timeout: number }): Promise<void>;
   fill(value: string, opts?: { timeout: number }): Promise<void>;
+  press(key: string, opts?: { timeout: number }): Promise<void>;
   selectOption(option: { label: string }, opts?: { timeout: number }): Promise<unknown>;
+  evaluate<T>(fn: (el: Element) => T): Promise<T>;
   count(): Promise<number>;
 };
 
@@ -37,7 +39,7 @@ type PWPage = {
   goto(url: string, opts: { waitUntil: "domcontentloaded"; timeout: number }): Promise<unknown>;
   screenshot(opts: { type: "jpeg"; quality: number }): Promise<Buffer>;
   evaluate<T>(fn: () => T): Promise<T>;
-  getByRole(role: string, opts?: { name?: string }): PWLocator;
+  getByRole(role: string, opts?: { name?: string | RegExp }): PWLocator;
   getByLabel(name: string): PWLocator;
   getByPlaceholder(name: string): PWLocator;
   getByText(text: string, opts?: { exact?: boolean }): PWLocator;
