@@ -1120,16 +1120,36 @@ export async function runTask(input: {
       const budget = needsForm(task) ? MAX_FORM_MODEL_CALLS : MAX_MODEL_CALLS;
       for (let i = 0; i < budget; i += 1) {
         let finish = i === budget - 1;
-        let decision = await askModel({
-          task,
-          memory,
-          vaultHeld: held(clean),
-          surface,
-          steps: steps.map((step) => step.label),
-          finish,
-          open: input.open,
-          formTask: needsForm(task),
-        });
+        let decision: Decision;
+        try {
+          decision = await askModel({
+            task,
+            memory,
+            vaultHeld: held(clean),
+            surface,
+            steps: steps.map((step) => step.label),
+            finish,
+            open: input.open,
+            formTask: needsForm(task),
+          });
+        } catch (error) {
+          // One unusable reply should not throw away the steps already taken.
+          const why = error instanceof Error ? error.message.replace(/\s+/g, " ").slice(0, 200) : String(error);
+          const label = `The step was unusable: ${why} at ${surface.url}`;
+          console.warn(`[berth] ${clean} ${label}`);
+          misses += 1;
+          if (misses < MAX_MISSES) {
+            steps.push({ label });
+            continue;
+          }
+          const summary = await answerTask({ task, surface, steps: steps.map((step) => step.label) });
+          return viewFrom(surface, {
+            vaultHeld: held(clean),
+            steps: [...steps, { label }],
+            summary,
+            status: "ready",
+          });
+        }
         if (decision.action === "click" && /chat|ask ai|voice/i.test(decision.target)) {
           steps.push({ label: "Left the chat control alone." });
           continue;
