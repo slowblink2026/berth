@@ -302,7 +302,7 @@ function readerSurface(dock: ReaderDock): Surface {
     text: ex.text.slice(0, 6000),
     controls: ex.controls,
     engine: "reader",
-    challenge: looksLikeChallenge(ex.title, ex.text, dock.url),
+    challenge: false,
   };
 }
 
@@ -462,7 +462,7 @@ async function captureChrome(dock: ChromeDock): Promise<Surface> {
     text: text.slice(0, 6000),
     controls: controls.slice(0, 30),
     engine: "chrome",
-    challenge: looksLikeChallenge(title, text, url),
+    challenge: false,
   };
 }
 
