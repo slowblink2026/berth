@@ -4,10 +4,14 @@ import { isIP } from "node:net";
 import path from "node:path";
 import { isPrivateIp, sameSite } from "@/lib/berth/net";
 import type { DockResult, DockStatus, DockView, Step, Surface, SurfaceControl } from "@/lib/berth/types";
+import { env } from "@/lib/env.server";
+import { enqueueFor, evictable } from "./scheduler";
 
 const VIEW_W = 1100;
 const VIEW_H = 720;
-const MAX_CHROME = 2;
+// How many sites may hold a Chrome profile at once. Each one is a real browser
+// with its own memory, so raise it only as far as the host can carry.
+const MAX_CHROME = Math.min(8, Math.max(1, Number(env("BERTH_MAX_DOCKS")) || 2));
 const MAX_MODEL_CALLS = 12;
 const TASK_WINDOW_MS = 10 * 60 * 1000;
 const TASK_BUDGET = 16;
@@ -101,7 +105,6 @@ const docks = new Map<string, Dock>();
 const secrets = new Map<string, string>();
 const pending = new Map<string, Decision>();
 const taskStamps: number[] = [];
-const queues = new Map<string, Promise<unknown>>();
 let chromeFailedAt = 0;
 
 declare global {
@@ -174,12 +177,6 @@ async function resolveHost(host: string): Promise<string[]> {
   return ips;
 }
 
-function enqueueFor<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const prior = queues.get(key) ?? Promise.resolve();
-  const run = prior.then(fn, fn);
-  queues.set(key, run.then(() => undefined, () => undefined));
-  return run;
-}
 
 function fail(error: unknown): DockResult {
   const message = error instanceof Error ? error.message : "The dock failed.";
@@ -357,18 +354,18 @@ async function openChromeContext(id: string): Promise<PWContext> {
   }
 }
 
-async function evictChrome(keepId: string) {
+async function evictChrome(keepId: string): Promise<boolean> {
   const open = [...docks.values()].filter((dock): dock is ChromeDock => dock.kind === "chrome");
-  if (open.length < MAX_CHROME) return;
-  open.sort((a, b) => a.touched - b.touched);
+  if (open.length < MAX_CHROME) return true;
   let count = open.length;
-  for (const dock of open) {
-    if (dock.id === keepId) continue;
+  for (const dock of evictable(open, keepId, MAX_CHROME)) {
     await dock.context.close().catch(() => undefined);
     docks.delete(dock.id);
     count--;
-    if (count < MAX_CHROME) return;
   }
+  // Every other dock is mid-task. Closing one would kill a running task, so
+  // this caller waits for its turn rather than taking a seat that is taken.
+  return count < MAX_CHROME;
 }
 
 async function ensureChrome(id: string, homeUrl: string, currentUrl: string): Promise<ChromeDock | null> {
@@ -384,7 +381,10 @@ async function ensureChrome(id: string, homeUrl: string, currentUrl: string): Pr
   }
   if (existing?.kind === "reader") docks.delete(id);
   try {
-    await evictChrome(id);
+    if (!(await evictChrome(id))) {
+      console.warn("[berth] every dock is busy; not opening another for", id);
+      return null;
+    }
     const context = await openChromeContext(id);
     const page = context.pages()[0] ?? (await context.newPage());
     page.setDefaultTimeout(8000);
