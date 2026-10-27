@@ -31,8 +31,11 @@ ExecStart=/bin/bash -c '\
   npm run dev; \
   kill $XVFB_PID 2>/dev/null || true'
 
-# Kill the whole process group on stop so Xvfb, Node and Chrome all exit.
-KillMode=process
+# Kill the whole control group on stop so Xvfb, Node and every Chrome exit.
+# KillMode=process would signal only npm and leave the browsers it started
+# running, so each restart would abandon another set of them until the host
+# could no longer start one within Playwright's launch timeout.
+KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=15
 
