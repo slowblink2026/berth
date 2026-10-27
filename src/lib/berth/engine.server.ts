@@ -14,7 +14,9 @@ const VIEW_H = 720;
 const MAX_CHROME = Math.min(8, Math.max(1, Number(env("BERTH_MAX_DOCKS")) || 2));
 const MAX_MODEL_CALLS = 12;
 const TASK_WINDOW_MS = 10 * 60 * 1000;
-const TASK_BUDGET = 16;
+// Tasks allowed across all sites per window. One watched item checking hourly
+// costs one; twenty of them waking together cost twenty.
+const TASK_BUDGET = Math.min(200, Math.max(1, Number(env("BERTH_TASK_BUDGET")) || 16));
 
 type Decision = {
   action: "click" | "type" | "scroll" | "scrollUp" | "press" | "done" | "hold";
