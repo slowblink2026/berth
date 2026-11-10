@@ -11,10 +11,10 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as WatchRouteImport } from './routes/watch'
-import { Route as ApiTaskRouteImport } from './routes/api/task'
-import { Route as ApiScreenshotRouteImport } from './routes/api/screenshot'
-import { Route as ApiWatchRouteImport } from './routes/api/watch'
 import { Route as ApiActiveRouteImport } from './routes/api/active'
+import { Route as ApiScreenshotRouteImport } from './routes/api/screenshot'
+import { Route as ApiTaskRouteImport } from './routes/api/task'
+import { Route as ApiWatchRouteImport } from './routes/api/watch'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -26,9 +26,9 @@ const WatchRoute = WatchRouteImport.update({
   path: '/watch',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ApiTaskRoute = ApiTaskRouteImport.update({
-  id: '/api/task',
-  path: '/api/task',
+const ApiActiveRoute = ApiActiveRouteImport.update({
+  id: '/api/active',
+  path: '/api/active',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiScreenshotRoute = ApiScreenshotRouteImport.update({
@@ -36,57 +36,76 @@ const ApiScreenshotRoute = ApiScreenshotRouteImport.update({
   path: '/api/screenshot',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiTaskRoute = ApiTaskRouteImport.update({
+  id: '/api/task',
+  path: '/api/task',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiWatchRoute = ApiWatchRouteImport.update({
   id: '/api/watch',
   path: '/api/watch',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiActiveRoute = ApiActiveRouteImport.update({
-  id: '/api/active',
-  path: '/api/active',
   getParentRoute: () => rootRouteImport,
 } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/watch': typeof WatchRoute
-  '/api/task': typeof ApiTaskRoute
-  '/api/screenshot': typeof ApiScreenshotRoute
-  '/api/watch': typeof ApiWatchRoute
   '/api/active': typeof ApiActiveRoute
+  '/api/screenshot': typeof ApiScreenshotRoute
+  '/api/task': typeof ApiTaskRoute
+  '/api/watch': typeof ApiWatchRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/watch': typeof WatchRoute
-  '/api/task': typeof ApiTaskRoute
-  '/api/screenshot': typeof ApiScreenshotRoute
-  '/api/watch': typeof ApiWatchRoute
   '/api/active': typeof ApiActiveRoute
+  '/api/screenshot': typeof ApiScreenshotRoute
+  '/api/task': typeof ApiTaskRoute
+  '/api/watch': typeof ApiWatchRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/watch': typeof WatchRoute
-  '/api/task': typeof ApiTaskRoute
-  '/api/screenshot': typeof ApiScreenshotRoute
-  '/api/watch': typeof ApiWatchRoute
   '/api/active': typeof ApiActiveRoute
+  '/api/screenshot': typeof ApiScreenshotRoute
+  '/api/task': typeof ApiTaskRoute
+  '/api/watch': typeof ApiWatchRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/watch' | '/api/task' | '/api/screenshot' | '/api/watch' | '/api/active'
+  fullPaths:
+    | '/'
+    | '/watch'
+    | '/api/active'
+    | '/api/screenshot'
+    | '/api/task'
+    | '/api/watch'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/watch' | '/api/task' | '/api/screenshot' | '/api/watch' | '/api/active'
-  id: '__root__' | '/' | '/watch' | '/api/task' | '/api/screenshot' | '/api/watch' | '/api/active'
+  to:
+    | '/'
+    | '/watch'
+    | '/api/active'
+    | '/api/screenshot'
+    | '/api/task'
+    | '/api/watch'
+  id:
+    | '__root__'
+    | '/'
+    | '/watch'
+    | '/api/active'
+    | '/api/screenshot'
+    | '/api/task'
+    | '/api/watch'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   WatchRoute: typeof WatchRoute
-  ApiTaskRoute: typeof ApiTaskRoute
-  ApiScreenshotRoute: typeof ApiScreenshotRoute
-  ApiWatchRoute: typeof ApiWatchRoute
   ApiActiveRoute: typeof ApiActiveRoute
+  ApiScreenshotRoute: typeof ApiScreenshotRoute
+  ApiTaskRoute: typeof ApiTaskRoute
+  ApiWatchRoute: typeof ApiWatchRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -105,11 +124,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WatchRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/task': {
-      id: '/api/task'
-      path: '/api/task'
-      fullPath: '/api/task'
-      preLoaderRoute: typeof ApiTaskRouteImport
+    '/api/active': {
+      id: '/api/active'
+      path: '/api/active'
+      fullPath: '/api/active'
+      preLoaderRoute: typeof ApiActiveRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/screenshot': {
@@ -119,18 +138,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiScreenshotRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/task': {
+      id: '/api/task'
+      path: '/api/task'
+      fullPath: '/api/task'
+      preLoaderRoute: typeof ApiTaskRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/watch': {
       id: '/api/watch'
       path: '/api/watch'
       fullPath: '/api/watch'
       preLoaderRoute: typeof ApiWatchRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/active': {
-      id: '/api/active'
-      path: '/api/active'
-      fullPath: '/api/active'
-      preLoaderRoute: typeof ApiActiveRouteImport
       parentRoute: typeof rootRouteImport
     }
   }
@@ -139,10 +158,10 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   WatchRoute: WatchRoute,
-  ApiTaskRoute: ApiTaskRoute,
-  ApiScreenshotRoute: ApiScreenshotRoute,
-  ApiWatchRoute: ApiWatchRoute,
   ApiActiveRoute: ApiActiveRoute,
+  ApiScreenshotRoute: ApiScreenshotRoute,
+  ApiTaskRoute: ApiTaskRoute,
+  ApiWatchRoute: ApiWatchRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

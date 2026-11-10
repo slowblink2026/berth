@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { createFileRoute } from "@tanstack/react-router";
 import { env } from "@/lib/env.server";
 import type { DockResult } from "@/lib/berth/types";
@@ -21,8 +22,10 @@ function authorized(request: Request): boolean {
     const host = request.headers.get("host") ?? "";
     return host.startsWith("127.0.0.1:") || host === "127.0.0.1" || host.startsWith("localhost:");
   }
-  const auth = request.headers.get("authorization") ?? "";
-  return auth === `Bearer ${apiKey}`;
+  const given = Buffer.from(request.headers.get("authorization") ?? "");
+  const wanted = Buffer.from(`Bearer ${apiKey}`);
+  // Constant-time, so the key can't be guessed a character at a time from response timing.
+  return given.length === wanted.length && timingSafeEqual(given, wanted);
 }
 
 function reply(result: DockResult) {
@@ -36,10 +39,22 @@ function reply(result: DockResult) {
     summary: result.summary,
     steps: result.steps.map((step) => step.label),
     pending: result.pendingLabel,
+    // How long it took, how many model calls it cost, and whether it ran out of
+    // time or steps and answered with what it had.
+    elapsed_ms: result.metrics?.elapsedMs ?? null,
+    model_calls: result.metrics?.modelCalls ?? null,
+    partial: result.metrics?.partial ?? false,
   });
 }
 
-async function run(request: Request, url: string, task: string) {
+type Limits = { timeoutMs?: number; maxSteps?: number };
+
+function limit(value: unknown): number | undefined {
+  const n = typeof value === "string" ? Number(value) : value;
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+async function run(request: Request, url: string, task: string, limits: Limits = {}) {
   if (!authorized(request)) {
     return Response.json({ ok: false, error: "Unauthorized." }, { status: 401 });
   }
@@ -61,6 +76,9 @@ async function run(request: Request, url: string, task: string) {
     currentUrl: homeUrl,
     task: job,
     memory: "",
+    shots: false,
+    deadlineMs: limits.timeoutMs,
+    maxSteps: limits.maxSteps,
   });
   return reply(result);
 }
@@ -97,13 +115,18 @@ export const Route = createFileRoute("/api/task")({
         if (params.get("approve") === "1") {
           return approve(request, params.get("url") ?? "");
         }
-        return run(request, params.get("url") ?? "", params.get("task") ?? "");
+        return run(request, params.get("url") ?? "", params.get("task") ?? "", {
+          timeoutMs: limit(params.get("timeout_ms")),
+          maxSteps: limit(params.get("max_steps")),
+        });
       },
       POST: async ({ request }) => {
         const body = (await request.json().catch(() => null)) as {
           url?: unknown;
           task?: unknown;
           approve?: unknown;
+          timeout_ms?: unknown;
+          max_steps?: unknown;
         } | null;
         if (body?.approve === true) {
           return approve(request, typeof body?.url === "string" ? body.url : "");
@@ -112,6 +135,7 @@ export const Route = createFileRoute("/api/task")({
           request,
           typeof body?.url === "string" ? body.url : "",
           typeof body?.task === "string" ? body.task : "",
+          { timeoutMs: limit(body?.timeout_ms), maxSteps: limit(body?.max_steps) },
         );
       },
     },

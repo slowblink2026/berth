@@ -84,6 +84,8 @@ docker run -d -p 8080:8080 -e BERTH_API_KEY=change-me -e XAI_API_KEY=xai-... ber
 }
 ```
 
+Optional: `"timeout_ms"` (answer within this long, with whatever has been found; default 150000) and `"max_steps"` (default 14). Set `timeout_ms` below your own HTTP timeout so you always get an answer back.
+
 **Response**
 
 ```json
@@ -102,6 +104,9 @@ docker run -d -p 8080:8080 -e BERTH_API_KEY=change-me -e XAI_API_KEY=xai-... ber
 | Field | Description |
 |---|---|
 | `status` | `ready` — done. `hold` — paused before a sensitive action (see below). `challenge` — hit a CAPTCHA. |
+| `elapsed_ms` | How long the task took |
+| `model_calls` | How many LLM calls it cost. A simple read of one page is one call. |
+| `partial` | `true` when the task ran out of time or steps and answered with what it had found |
 | `summary` | The agent's answer |
 | `steps` | What the browser did |
 | `pending` | When `status` is `hold`: description of the action waiting for approval |
@@ -129,6 +134,19 @@ Both endpoints also accept GET with query params:
 GET /api/task?url=https://example.com&task=What+is+the+price?
 GET /api/task?url=https://example.com&approve=1
 ```
+
+## How it works, and why it is fast
+
+- **One call for a simple read.** The step that decides the answer is on the page also writes the answer.
+- **Numbered controls.** The model is shown every link, button, field, list and suggestion as `[12] button: Search` and points at one by number, so clicks land on the right element. Suggestion lists, selects, checkboxes and tabs work.
+- **The whole page, not just the top.** The model gets the top of the page plus the passages further down that mention the task's own words, so it rarely needs to scroll.
+- **Lite loading.** Images, video, fonts and trackers are skipped during tasks (`BERTH_LITE=0` to load everything).
+- **Waits for the page, not the clock.** A step continues as soon as the page stops changing.
+- **Always answers.** Every task returns inside its deadline with what it found and `partial: true`, never a silent timeout.
+- **Recovers.** A crashed tab is replaced, a link that opens a new tab is followed, alert boxes are dismissed, a missed click is reported to the model so it can try another way, and a search engine that shows a human check is swapped for DuckDuckGo.
+- **Still asks first.** Paying, ordering, deleting, subscribing and password changes stop at `hold` for approval.
+
+Tests: `npm run test:berth` (planning logic) and `npm run test:e2e` (the engine against a real Chromium, local pages and a scripted model; set `BERTH_CHROME_PATH` to use an installed browser).
 
 ## LLM configuration
 

@@ -9,7 +9,7 @@ export const Route = createFileRoute("/api/screenshot")({
         const mod = await import("@/lib/berth/engine.server");
         const buf = await mod.captureScreenshot(id);
         if (!buf) return new Response("No screenshot available", { status: 404 });
-        return new Response(buf, {
+        return new Response(new Uint8Array(buf), {
           headers: { "Content-Type": "image/jpeg", "Cache-Control": "no-store" },
         });
       },
