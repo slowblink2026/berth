@@ -41,7 +41,7 @@ function limit(value: unknown): number | undefined {
   return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
-async function run(request: Request, url: string, task: string, timeoutMs?: number) {
+async function run(request: Request, url: string, task: string, timeoutMs?: number, approved = false) {
   if (!authorized(request)) {
     return Response.json({ ok: false, error: "Unauthorized." }, { status: 401 });
   }
@@ -66,6 +66,7 @@ async function run(request: Request, url: string, task: string, timeoutMs?: numb
     memory: "",
     open: !given,
     deadlineMs: timeoutMs,
+    approved,
   });
   return reply(result);
 }
@@ -107,6 +108,7 @@ export const Route = createFileRoute("/api/task")({
           task?: unknown;
           approve?: unknown;
           timeout_ms?: unknown;
+          approved?: unknown;
         } | null;
         if (body?.approve === true) {
           return approve(request, typeof body?.url === "string" ? body.url : "");
@@ -116,6 +118,8 @@ export const Route = createFileRoute("/api/task")({
           typeof body?.url === "string" ? body.url : "",
           typeof body?.task === "string" ? body.task : "",
           limit(body?.timeout_ms),
+          // Set by a caller whose own user has approved this exact task. POST only.
+          body?.approved === true,
         );
       },
     },

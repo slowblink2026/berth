@@ -135,6 +135,26 @@ GET /api/task?url=https://example.com&approve=1
 
 Optional in the body: `"timeout_ms"` (answer within this long with whatever has been found; default 150000). Set it below your own HTTP timeout so you always get an answer back.
 
+## Saved logins
+
+Store one login per website. The agent uses it when a task meets a sign-in page on that site, and only on that site.
+
+```bash
+# save or replace
+curl -s -X POST http://127.0.0.1:8080/api/vault -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"site":"exhalecoffee.com","username":"me@example.com","password":"..."}'
+# list (sites and usernames only; passwords never come back out)
+curl -s http://127.0.0.1:8080/api/vault -H "Authorization: Bearer $KEY"
+# remove
+curl -s -X DELETE "http://127.0.0.1:8080/api/vault?site=exhalecoffee.com" -H "Authorization: Bearer $KEY"
+```
+
+Passwords are encrypted on disk (`.local/berth-vault.json`, AES-256-GCM) with `BERTH_VAULT_KEY`, or with a key generated beside the vault if that is unset. The model never sees a password: it asks for "the saved login" and the engine types it. A site that also asks for a one-time code will still stop; sign in once through the live view and the session is kept in that site's browser profile.
+
+## Tasks that are already approved
+
+A task that would pay, order, send, delete or change a password stops at `hold`. When your own user has already approved the exact task, send `"approved": true` (POST only) and it is carried out without stopping. Human checks still stop it.
+
 ## What makes it quick and hard to lose
 
 - **Numbered controls.** The model is shown every link, button, field, dropdown and suggestion as `[12] text: Station name or code = "Walton"` and points at one by number. Two boxes with the same label are different numbers, and a filled box shows its value.

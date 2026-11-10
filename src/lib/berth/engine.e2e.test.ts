@@ -13,6 +13,7 @@ process.env.NODE_ENV = "test";
 process.env.BERTH_TEST_ALLOW_LOOPBACK = "1";
 process.env.BERTH_HEADLESS = "1";
 process.env.LLM_VISION = "0";
+process.env.BERTH_VAULT_DIR = path.join(process.cwd(), ".local", "e2e-vault");
 
 const PAGES: Record<string, string> = {
   "/quote": `<title>LMND quote</title><h1>Lemonade, Inc. (LMND)</h1><p>Price 39.87 USD, up 0.08 (+0.19%). As of 3:29 PM EST.</p>
@@ -38,7 +39,12 @@ const PAGES: Record<string, string> = {
   "/tabs": `<title>Tabs</title><a href="/quote" target="_blank">Open quote in new tab</a>`,
   "/alert": `<title>Alert</title><button onclick="alert('Are you sure?'); document.body.append('Confirmed order view')">Show details</button>`,
   "/long": `<title>Long</title>${"<p>Filler paragraph about nothing.</p>".repeat(600)}<p>The drop-off charge at Heathrow is £7 per visit.</p>`,
-  "/pay": `<title>Checkout</title><button>Pay now</button>`,
+  "/pay": `<title>Checkout</title><button onclick="document.body.append(' Order placed, reference EX-2127901')">Pay now</button>`,
+  "/login": `<title>Sign in</title><h1>Sign in to your account</h1>
+    <form onsubmit="event.preventDefault(); document.getElementById('out').textContent = (email.value === 'me@example.com' && pass.value === 'correct horse') ? 'Welcome back. Next delivery: Tuesday 17 November.' : 'Wrong email or password';">
+      <label>Email <input type="email" name="email" id="email"></label>
+      <label>Password <input type="password" name="pass" id="pass"></label>
+      <button>Sign in</button></form><div id="out"></div>`,
 };
 
 type Script = (prompt: string, system: string) => Record<string, unknown>;
@@ -94,7 +100,7 @@ before(async () => {
 });
 
 after(async () => {
-  for (const id of ["e2e-quote", "e2e-trains", "e2e-tabs", "e2e-alert", "e2e-long1", "e2e-pay00", "e2e-twins"]) await engine.closeDock(id);
+  for (const id of ["e2e-quote", "e2e-trains", "e2e-tabs", "e2e-alert", "e2e-long1", "e2e-pay00", "e2e-twins", "e2e-login"]) await engine.closeDock(id);
   servers.forEach((s) => s.close());
   await rm(path.join(process.cwd(), ".local", "berth-profiles"), { recursive: true, force: true }).catch(() => undefined);
 });
@@ -212,6 +218,43 @@ describe("berth engine", () => {
     };
     const r = ok(await run("e2e-quote", "/quote", "Press the missing button"));
     assert.equal(r.status, "ready");
+  });
+
+  it("signs in with the saved login without the model ever seeing the password", async () => {
+    const vault = await import("./vault.server.ts");
+    vault.saveLogin(base, "me@example.com", "correct horse");
+    let step = 0;
+    script = (prompt) => {
+      step += 1;
+      assert.ok(!prompt.includes("correct horse"), "the password is never in the prompt");
+      if (step === 1) {
+        assert.match(prompt, /Saved login on this host: yes/);
+        return { action: "type", useVault: true, text: "" };
+      }
+      if (step === 2) return { action: "click", ref: refOf(prompt, /button: Sign in/) };
+      assert.match(prompt, /Next delivery: Tuesday 17 November/);
+      return { action: "done", summary: "Signed in. The next delivery is on Tuesday 17 November." };
+    };
+    const r = ok(await run("e2e-login", "/login", "Sign in and tell me when my next delivery is"));
+    assert.match(r.summary, /Tuesday 17 November/);
+    assert.ok(!JSON.stringify(r).includes("correct horse"));
+    assert.equal(r.steps[0]?.label, "Used the saved login.");
+    vault.removeLogin(base);
+  });
+
+  it("carries out an approved task past the paying step, and reports what happened", async () => {
+    let step = 0;
+    script = (prompt, system) => {
+      step += 1;
+      assert.match(system, /already reviewed and approved/);
+      if (step === 1) return { action: "click", ref: refOf(prompt, /Pay now/) };
+      assert.match(prompt, /Order placed, reference EX-2127901/);
+      return { action: "done", summary: "The order was placed. Reference EX-2127901." };
+    };
+    const r = ok(await run("e2e-pay00", "/pay", "Pay for the order", { approved: true }));
+    assert.equal(r.status, "ready");
+    assert.match(r.summary, /EX-2127901/);
+    await engine.closeDock("e2e-pay00");
   });
 
   it("still holds before paying", async () => {

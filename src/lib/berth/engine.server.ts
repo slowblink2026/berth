@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { isIP } from "node:net";
 import path from "node:path";
 import { isPrivateIp, sameSite } from "./net.ts";
+import { hasLogin, loginFor } from "./vault.server.ts";
 import { focusText, isTrackerHost, plainAnswer, searchFallbackUrl } from "./plan.ts";
 import type { DockResult, DockStatus, DockView, Step, Surface, SurfaceControl, TaskMetrics } from "@/lib/berth/types";
 
@@ -607,6 +608,9 @@ async function captureChrome(dock: ChromeDock, opts: { shot?: boolean } = {}): P
           const select = el as HTMLSelectElement;
           item.value = clean(select.selectedOptions[0]?.textContent, 60);
           item.options = [...select.options].slice(0, 25).map((o) => clean(o.textContent, 50)).filter(Boolean);
+        } else if (kind === "password") {
+          // What is typed into a password box is never read back: not to the model, a log or a caller.
+          item.value = (el as HTMLInputElement).value ? "(filled)" : undefined;
         } else if (isField) {
           item.value = clean((el as HTMLInputElement).value, 60) || undefined;
         } else if (kind === "checkbox" || kind === "radio" || kind === "switch") {
@@ -771,6 +775,7 @@ async function askModel(input: {
   finish?: boolean;
   open?: boolean;
   formTask?: boolean;
+  approved?: boolean;
 }): Promise<Decision> {
   const call = modelCall();
   const controls = input.surface.controls.map(controlLine).join("\n");
@@ -809,10 +814,12 @@ async function askModel(input: {
           ? "No more actions. action must be done. summary answers the task from the visible page. Do not claim a click."
           : "",
         "click target is the visible label only. Never include a tag such as a: or button:.",
-        "Never invent or repeat a password. If a login is required and a saved login exists, set useVault true and leave text empty.",
+        "Never invent or repeat a password. If a sign-in is required and a saved login exists, use action type with useVault true and text empty: that fills the username and password boxes that are on screen, and nothing else. Then click the sign-in or continue button yourself. If there is no saved login, use hold and say a login for this site needs saving.",
         "If the page says it is still loading, searching, or comparing, use wait. Do not hold and do not answer from a half-loaded page.",
         "If the page is a human check, use hold.",
-        "Searching, choosing a date or a time, and reading a price are never sensitive. Set sensitive true and use hold only when the step itself pays, sends money, confirms a booking that carries someone's details, deletes something, or changes a password.",
+        input.approved
+          ? "The person who set this task has already reviewed and approved it, including the step that submits, orders, pays or changes something. Carry the task out exactly as written and do not pause for approval. Do nothing beyond what the task says. Use hold only for a human check or when the page asks for something the task does not give you."
+          : "Searching, choosing a date or a time, and reading a price are never sensitive. Set sensitive true and use hold only when the step itself pays, sends money, confirms a booking that carries someone's details, deletes something, or changes a password.",
         input.open
           ? "You may leave the start site for any public site the task needs, such as search results. Once there, stay on the sites that answer the task."
           : "Stay on this site.",
@@ -1144,11 +1151,31 @@ async function perform(dock: ChromeDock, decision: Decision) {
   }
   if (decision.action === "type") {
     if (decision.useVault) {
-      const secret = secrets.get(dock.id);
-      if (!secret) throw new Error("No saved login on this host.");
-      const field = page.locator("input[type='password'], input[name*='password' i]").first();
-      if ((await field.count()) === 0) throw new Error("No password field on this page.");
-      await field.fill(secret, { timeout: 5000 });
+      // The login saved for the site this page is on, never for another site:
+      // a page that sent the browser elsewhere gets nothing.
+      const saved = loginFor(page.url());
+      const password = saved?.password ?? secrets.get(dock.id);
+      if (!password) throw new Error("No saved login for this site.");
+      const usable = ":not([disabled]):not([readonly])";
+      const userBox = page
+        .locator(
+          `input[autocomplete='username']${usable}, input[type='email']${usable}, input[name*='user' i]${usable}, ` +
+            `input[name*='email' i]${usable}, input[id*='user' i]${usable}, input[id*='email' i]${usable}, input[name*='login' i]${usable}`,
+        )
+        .first();
+      const passBox = page.locator(`input[type='password']${usable}`).first();
+      let filled = 0;
+      // Whichever boxes are on screen are filled: both on a one-page sign-in,
+      // one at a time on a site that asks for the password on a second page.
+      if (saved?.username && (await userBox.count()) > 0) {
+        await userBox.fill(saved.username, { timeout: 5000 });
+        filled += 1;
+      }
+      if ((await passBox.count()) > 0) {
+        await passBox.fill(password, { timeout: 5000 });
+        filled += 1;
+      }
+      if (!filled) throw new Error("No sign-in boxes on this page.");
       await settle(page);
       return;
     }
@@ -1286,7 +1313,10 @@ async function guardSite(dock: ChromeDock): Promise<string | null> {
 }
 
 function held(id: string): boolean {
-  return secrets.has(id);
+  if (secrets.has(id)) return true;
+  const dock = docks.get(id);
+  const url = dock?.kind === "chrome" ? dock.page.url() : dock?.url;
+  return Boolean(url && hasLogin(url));
 }
 
 export function setSecret(id: string, secret: string): { ok: true; held: boolean } | DockResult {
@@ -1350,6 +1380,8 @@ export async function runTask(input: {
   open?: boolean;
   /** Give up and answer with what is on the page after this long. */
   deadlineMs?: number;
+  /** The person has already approved this exact task, including its committing step. */
+  approved?: boolean;
 }): Promise<DockResult> {
   let clean: string;
   try {
@@ -1453,6 +1485,7 @@ export async function runTask(input: {
             finish,
             open: input.open,
             formTask,
+            approved: input.approved,
           });
         } catch (error) {
           // One unusable reply should not throw away the steps already taken.
@@ -1514,6 +1547,7 @@ export async function runTask(input: {
               finish: true,
               open: input.open,
               formTask,
+              approved: input.approved,
             });
           } catch {
             // finish means answer from the page, which is what done does.
@@ -1525,7 +1559,7 @@ export async function runTask(input: {
         }
         // Check hold/sensitive before done/finish so sensitive actions on the last
         // iteration are not silently swallowed.
-        if (decision.action === "hold" || isSensitive(decision)) {
+        if (decision.action === "hold" || (isSensitive(decision) && !input.approved)) {
           steps.push({ label: stepLabel(decision) });
           emitStep(clean, stepLabel(decision));
           const executable = decision.action !== "hold";
