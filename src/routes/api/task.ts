@@ -25,13 +25,23 @@ function reply(result: DockResult) {
     summary: result.summary,
     steps: result.steps.map((step) => step.label),
     pending: result.pendingLabel,
+    // How long it took, how many model calls it cost, and whether it ran out of
+    // time or steps and answered with what it had.
+    elapsed_ms: result.metrics?.elapsedMs ?? null,
+    model_calls: result.metrics?.modelCalls ?? null,
+    partial: result.metrics?.partial ?? false,
   });
 }
 
 // Without a url, a task starts at this search page and may follow results to other public sites.
 const SEARCH_START = "https://duckduckgo.com/";
 
-async function run(request: Request, url: string, task: string) {
+function limit(value: unknown): number | undefined {
+  const n = typeof value === "string" ? Number(value) : value;
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+async function run(request: Request, url: string, task: string, timeoutMs?: number) {
   if (!authorized(request)) {
     return Response.json({ ok: false, error: "Unauthorized." }, { status: 401 });
   }
@@ -55,6 +65,7 @@ async function run(request: Request, url: string, task: string) {
     task: job,
     memory: "",
     open: !given,
+    deadlineMs: timeoutMs,
   });
   return reply(result);
 }
@@ -88,13 +99,14 @@ export const Route = createFileRoute("/api/task")({
         if (params.get("approve") === "1") {
           return approve(request, params.get("url") ?? "");
         }
-        return run(request, params.get("url") ?? "", params.get("task") ?? "");
+        return run(request, params.get("url") ?? "", params.get("task") ?? "", limit(params.get("timeout_ms")));
       },
       POST: async ({ request }) => {
         const body = (await request.json().catch(() => null)) as {
           url?: unknown;
           task?: unknown;
           approve?: unknown;
+          timeout_ms?: unknown;
         } | null;
         if (body?.approve === true) {
           return approve(request, typeof body?.url === "string" ? body.url : "");
@@ -103,6 +115,7 @@ export const Route = createFileRoute("/api/task")({
           request,
           typeof body?.url === "string" ? body.url : "",
           typeof body?.task === "string" ? body.task : "",
+          limit(body?.timeout_ms),
         );
       },
     },

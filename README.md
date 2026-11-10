@@ -102,6 +102,9 @@ docker run -d -p 8080:8080 -e BERTH_API_KEY=change-me -e XAI_API_KEY=xai-... ber
 | Field | Description |
 |---|---|
 | `status` | `ready` — done. `hold` — paused before a sensitive action (see below). `challenge` — hit a CAPTCHA. |
+| `elapsed_ms` | How long the task took |
+| `model_calls` | How many LLM calls it cost. A simple read of one page is usually one. |
+| `partial` | `true` when the task ran out of time, steps or tries and answered with what it had found |
 | `summary` | The agent's answer |
 | `steps` | What the browser did |
 | `pending` | When `status` is `hold`: description of the action waiting for approval |
@@ -129,6 +132,20 @@ Both endpoints also accept GET with query params:
 GET /api/task?url=https://example.com&task=What+is+the+price?
 GET /api/task?url=https://example.com&approve=1
 ```
+
+Optional in the body: `"timeout_ms"` (answer within this long with whatever has been found; default 150000). Set it below your own HTTP timeout so you always get an answer back.
+
+## What makes it quick and hard to lose
+
+- **Numbered controls.** The model is shown every link, button, field, dropdown and suggestion as `[12] text: Station name or code = "Walton"` and points at one by number. Two boxes with the same label are different numbers, and a filled box shows its value.
+- **One call for a simple read.** When the step that finds the answer writes a real one, it is used as is.
+- **The whole page, not just the top.** The model gets the top of the page plus the passages further down that mention the task's own words.
+- **Waits for the page, not the clock.** A step continues as soon as the page stops changing.
+- **Lite loading.** Video, fonts and trackers are skipped; images too when screenshots are not sent to the model.
+- **Always answers.** Every task returns inside its deadline with what it found and `partial: true`.
+- **Recovers.** A crashed tab is replaced, a link that opens a new tab is followed, alert boxes are dismissed, a busy site is never closed to make room, and a Google "unusual traffic" page is swapped for DuckDuckGo.
+
+Tests: `npm run test:berth` (decision and planning logic) and `npm run test:e2e` (the engine against a real Chromium, local pages and a scripted model; set `BERTH_CHROME_PATH` to use an installed browser).
 
 ## LLM configuration
 

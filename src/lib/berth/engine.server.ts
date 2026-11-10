@@ -3,11 +3,25 @@ import { mkdir } from "node:fs/promises";
 import { isIP } from "node:net";
 import path from "node:path";
 import { isPrivateIp, sameSite } from "./net.ts";
-import type { DockResult, DockStatus, DockView, Step, Surface, SurfaceControl } from "@/lib/berth/types";
+import { focusText, isTrackerHost, plainAnswer, searchFallbackUrl } from "./plan.ts";
+import type { DockResult, DockStatus, DockView, Step, Surface, SurfaceControl, TaskMetrics } from "@/lib/berth/types";
 
 const VIEW_W = 1100;
 const VIEW_H = 720;
-const MAX_CHROME = 2;
+function envInt(name: string, fallback: number, min: number, max: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= min && value <= max ? Math.round(value) : fallback;
+}
+
+const MAX_CHROME = envInt("BERTH_MAX_CHROME", 3, 1, 8);
+// A task always answers inside this, with whatever it has: a caller that gives
+// up at its own timeout gets nothing back at all.
+const TASK_DEADLINE_MS = envInt("BERTH_TASK_DEADLINE_MS", 150_000, 10_000, 600_000);
+// Video, fonts and trackers are never needed to do a task. Images are skipped too
+// when the model is not being shown screenshots. BERTH_LITE=0 loads everything.
+const LITE = process.env.BERTH_LITE !== "0";
+const HEADLESS = process.env.BERTH_HEADLESS === "1";
+const TEXT_FOR_MODEL = 7000;
 const MAX_MODEL_CALLS = 12;
 // A form task spends steps on a route, a date, a direction and a passenger count
 // before any result is on screen, so it gets a larger budget with a hard cap.
@@ -21,10 +35,12 @@ const MAX_REPEATS = 3;
 const WAIT_MS = 4000;
 const MAX_WAITS = 5;
 const TASK_WINDOW_MS = 10 * 60 * 1000;
-const TASK_BUDGET = 16;
+const TASK_BUDGET = envInt("BERTH_TASK_BUDGET", 40, 1, 1000);
 
 type Decision = {
   action: "click" | "type" | "select" | "clickAt" | "scroll" | "scrollUp" | "press" | "wait" | "done" | "hold";
+  /** The [number] of a control from the list the model was shown, when it used one. */
+  ref?: number | null;
   target: string;
   text: string;
   useVault: boolean;
@@ -64,16 +80,27 @@ type PWPage = {
   keyboard: { type(text: string): Promise<void>; press(key: string): Promise<void> };
   goBack(opts?: { timeout: number }): Promise<unknown>;
   setDefaultTimeout(ms: number): void;
+  isClosed(): boolean;
+  close(): Promise<void>;
+  bringToFront(): Promise<void>;
+  on(event: "dialog", fn: (dialog: { dismiss(): Promise<void> }) => void): void;
+};
+
+type PWRoute = {
+  request(): { resourceType(): string; url(): string };
+  abort(): Promise<void>;
+  continue(): Promise<void>;
 };
 
 type PWContext = {
   pages(): PWPage[];
   newPage(): Promise<PWPage>;
   close(): Promise<void>;
+  route(pattern: string, fn: (route: PWRoute) => void): Promise<void>;
 };
 
 type ChromiumApi = {
-  launch(opts: { headless: boolean; args: string[]; timeout: number }): Promise<{
+  launch(opts: { headless: boolean; args: string[]; timeout: number; executablePath?: string }): Promise<{
     newContext(opts: {
       viewport: { width: number; height: number };
       colorScheme: "light";
@@ -88,6 +115,7 @@ type ChromiumApi = {
       colorScheme: "light";
       args: string[];
       timeout: number;
+      executablePath?: string;
     },
   ): Promise<PWContext>;
 };
@@ -114,6 +142,8 @@ type ReaderDock = {
 type Dock = ChromeDock | ReaderDock;
 
 const docks = new Map<string, Dock>();
+// Docks with a task in flight: never closed to make room for another site.
+const busy = new Set<string>();
 const secrets = new Map<string, string>();
 const pending = new Map<string, Decision>();
 const taskStamps: number[] = [];
@@ -168,14 +198,22 @@ export async function captureScreenshot(id: string): Promise<Buffer | null> {
 const CHROME_ARGS = [
   "--disable-dev-shm-usage",
   "--disable-gpu",
-  "--ozone-platform=x11",
+  ...(HEADLESS ? [] : ["--ozone-platform=x11"]),
+  // Work Chrome does for a person at a desk, not for a task runner.
+  "--disable-background-networking",
+  "--disable-component-update",
+  "--disable-sync",
+  "--mute-audio",
+  "--disable-features=Translate,MediaRouter,OptimizationHints",
+  "--disable-background-timer-throttling",
+  "--disable-renderer-backgrounding",
   "--no-first-run",
   "--no-default-browser-check",
   ...(typeof process.getuid === "function" && process.getuid() === 0
     ? ["--no-sandbox", "--disable-setuid-sandbox"]
     : []),
 ];
-const KEYS = new Set(["Enter", "Tab", "Escape", "ArrowDown", "ArrowUp"]);
+const KEYS = new Set(["Enter", "Tab", "Escape", "ArrowDown", "ArrowUp", "Backspace", "PageDown", "PageUp"]);
 // Whole phrases only. Single words such as "pay", "transfer" or "delete" appear
 // in ordinary search results — a train with a transfer at Crewe, a page footer
 // about payment — and used to hold a plain search.
@@ -227,6 +265,10 @@ async function assertPublicUrl(raw: string): Promise<URL> {
   const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
   if (!host || host === "localhost" || host.endsWith(".local") || host.endsWith(".internal")) {
     throw new Error("That address stays off this dock.");
+  }
+  // Tests drive a page server on loopback; nothing else may ever switch this on.
+  if (process.env.NODE_ENV === "test" && process.env.BERTH_TEST_ALLOW_LOOPBACK === "1" && host === "127.0.0.1") {
+    return url;
   }
   let ips: string[] = [];
   try {
@@ -336,27 +378,80 @@ async function loadChromium(): Promise<ChromiumApi> {
   return mod.chromium;
 }
 
+// With screenshots going to the model, images have to load or it is shown a blank page.
+function visionOn(): boolean {
+  if (process.env.LLM_VISION) return process.env.LLM_VISION === "1";
+  return (process.env.LLM_BASE_URL || "https://api.x.ai/v1").includes("api.x.ai");
+}
+const HEAVY = new Set(visionOn() ? ["media"] : ["image", "media", "font"]);
+
+async function prepareContext(ctx: PWContext): Promise<PWContext> {
+  if (LITE) {
+    await ctx
+      .route("**/*", (route) => {
+        const request = route.request();
+        let host = "";
+        try {
+          host = new URL(request.url()).hostname;
+        } catch {
+          host = "";
+        }
+        if (HEAVY.has(request.resourceType()) || isTrackerHost(host)) {
+          route.abort().catch(() => undefined);
+        } else {
+          route.continue().catch(() => undefined);
+        }
+      })
+      .catch(() => undefined);
+  }
+  return ctx;
+}
+
 async function openChromeContext(id: string): Promise<PWContext> {
   const chromium = await loadChromium();
   const dir = path.join(process.cwd(), ".local", "berth-profiles", id);
+  const executablePath = process.env.BERTH_CHROME_PATH || undefined;
   try {
     await mkdir(dir, { recursive: true });
-    return await chromium.launchPersistentContext(dir, {
-      headless: false,
-      viewport: { width: VIEW_W, height: VIEW_H },
-      colorScheme: "light",
-      args: CHROME_ARGS,
-      timeout: 20000,
-    });
+    return await prepareContext(
+      await chromium.launchPersistentContext(dir, {
+        headless: HEADLESS,
+        viewport: { width: VIEW_W, height: VIEW_H },
+        colorScheme: "light",
+        args: CHROME_ARGS,
+        timeout: 20000,
+        executablePath,
+      }),
+    );
   } catch (error) {
     console.error("[berth] persistent chrome failed:", error);
-    const browser = await chromium.launch({ headless: false, args: CHROME_ARGS, timeout: 20000 });
+    const browser = await chromium.launch({ headless: HEADLESS, args: CHROME_ARGS, timeout: 20000, executablePath });
     const ctx = await browser.newContext({ viewport: { width: VIEW_W, height: VIEW_H }, colorScheme: "light" });
     (ctx as unknown as { on?: (ev: string, fn: () => void) => void }).on?.("close", () =>
       browser.close().catch(() => undefined),
     );
-    return ctx;
+    return prepareContext(ctx);
   }
+}
+
+function watchPage(page: PWPage) {
+  page.setDefaultTimeout(8000);
+  // An alert, confirm or "leave this page?" box freezes the page until answered.
+  page.on("dialog", (dialog) => {
+    dialog.dismiss().catch(() => undefined);
+  });
+}
+
+/** A link that opened a new tab: carry on in that tab, and close the one left behind. */
+async function followNewTab(dock: ChromeDock) {
+  const pages = dock.context.pages().filter((page) => !page.isClosed());
+  const newest = pages[pages.length - 1];
+  if (!newest || newest === dock.page || pages.length < 2) return;
+  const old = dock.page;
+  dock.page = newest;
+  watchPage(newest);
+  await newest.bringToFront().catch(() => undefined);
+  await old.close().catch(() => undefined);
 }
 
 async function evictChrome(keepId: string) {
@@ -365,7 +460,7 @@ async function evictChrome(keepId: string) {
   open.sort((a, b) => a.touched - b.touched);
   let count = open.length;
   for (const dock of open) {
-    if (dock.id === keepId) continue;
+    if (dock.id === keepId || busy.has(dock.id)) continue;
     await dock.context.close().catch(() => undefined);
     docks.delete(dock.id);
     count--;
@@ -375,7 +470,17 @@ async function evictChrome(keepId: string) {
 
 async function ensureChrome(id: string, homeUrl: string, currentUrl: string): Promise<ChromeDock | null> {
   if (Date.now() - chromeFailedAt < 20_000) return null;
-  const existing = docks.get(id);
+  let existing = docks.get(id);
+  if (existing?.kind === "chrome") {
+    // A crashed tab or a Chrome that was killed leaves a dock that fails every
+    // call until the service restarts. Notice it and open a fresh one instead.
+    const alive = !existing.page.isClosed() && (await existing.page.evaluate(() => 1).then(() => true, () => false));
+    if (!alive) {
+      await existing.context.close().catch(() => undefined);
+      docks.delete(id);
+      existing = undefined;
+    }
+  }
   if (existing?.kind === "chrome") {
     existing.touched = Date.now();
     existing.homeUrl = homeUrl;
@@ -389,7 +494,7 @@ async function ensureChrome(id: string, homeUrl: string, currentUrl: string): Pr
     await evictChrome(id);
     const context = await openChromeContext(id);
     const page = context.pages()[0] ?? (await context.newPage());
-    page.setDefaultTimeout(8000);
+    watchPage(page);
     await page.goto(currentUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
     const dock: ChromeDock = { kind: "chrome", id, homeUrl, context, page, touched: Date.now() };
     docks.set(id, dock);
@@ -432,69 +537,125 @@ async function ensure(id: string, homeUrl: string, currentUrl: string): Promise<
   return ensureReader(id, home.toString(), current.toString());
 }
 
-async function captureChrome(dock: ChromeDock): Promise<Surface> {
+async function captureChrome(dock: ChromeDock, opts: { shot?: boolean } = {}): Promise<Surface> {
   const url = dock.page.url();
+  const wantShot = opts.shot !== false;
   const [evalResult, shotResult] = await Promise.allSettled([
     dock.page.evaluate(() => {
+      const viewH = window.innerHeight;
       const visible = (el: Element) => {
         const rect = el.getBoundingClientRect();
+        if (rect.width <= 2 || rect.height <= 2) return false;
         const style = getComputedStyle(el);
-        return rect.width > 2 && rect.height > 2 && style.visibility !== "hidden" && style.display !== "none";
+        return style.visibility !== "hidden" && style.display !== "none" && style.opacity !== "0";
       };
-      const found: { tag: string; label: string; href?: string }[] = [];
+      const clean = (value: string | null | undefined, max = 80) => (value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+      const labelOf = (el: Element) => {
+        const input = el as HTMLInputElement;
+        const byFor = input.id ? document.querySelector(`label[for="${CSS.escape(input.id)}"]`)?.textContent : "";
+        const labelled = el.getAttribute("aria-labelledby");
+        const byId = labelled
+          ? labelled.split(/\s+/).map((id) => document.getElementById(id)?.textContent ?? "").join(" ")
+          : "";
+        return clean(
+          el.getAttribute("aria-label") || byId || byFor || (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT"
+            ? el.closest("label")?.textContent || input.placeholder || el.getAttribute("title") || el.getAttribute("name")
+            : el.textContent || el.getAttribute("title") || el.getAttribute("value") || (el.querySelector("img[alt]") as HTMLImageElement | null)?.alt),
+        );
+      };
+      const kindOf = (el: Element) => {
+        const role = el.getAttribute("role");
+        const tag = el.tagName.toLowerCase();
+        if (role && ["option", "tab", "menuitem", "checkbox", "radio", "switch", "combobox", "link", "button"].includes(role)) return role;
+        if (tag === "a") return "link";
+        if (tag === "select") return "select";
+        if (tag === "textarea") return "text";
+        if (tag === "summary") return "button";
+        if (tag === "input") {
+          const type = (el.getAttribute("type") || "text").toLowerCase();
+          if (["submit", "button", "reset", "image"].includes(type)) return "button";
+          if (["checkbox", "radio"].includes(type)) return type;
+          return ["search", "email", "password", "tel", "number", "date", "time", "url"].includes(type) ? type : "text";
+        }
+        return "button";
+      };
+      document.querySelectorAll("[data-berth-ref]").forEach((el) => el.removeAttribute("data-berth-ref"));
       const nodes = document.querySelectorAll(
-        "a, button, input, textarea, select, [role='button'], [role='link']," +
-          " [role='option'], [role='menuitem'], [role='radio'], [role='combobox'], [role='tab']",
+        "a[href], button, input:not([type='hidden']), textarea, select, summary, [role='button'], [role='link'], " +
+          "[role='option'], [role='tab'], [role='menuitem'], [role='checkbox'], [role='radio'], [role='switch'], [role='combobox'], [contenteditable='true']",
       );
+      type Found = { tag: string; label: string; href?: string; kind: string; value?: string; options?: string[]; near: boolean; el: Element };
+      const all: Found[] = [];
+      const seen = new Set<string>();
       for (const el of nodes) {
-        if (found.length >= 50) break;
+        if (all.length >= 400) break;
         if (!visible(el)) continue;
-        const label = (
-          el.getAttribute("aria-label") ||
-          el.textContent ||
-          el.getAttribute("placeholder") ||
-          el.getAttribute("name") ||
-          ""
-        )
-          .replace(/\s+/g, " ")
-          .trim()
-          .slice(0, 80);
-        if (!label) continue;
+        const off = (el as HTMLButtonElement).disabled === true;
+        const kind = kindOf(el);
+        const label = labelOf(el);
+        const isField = ["text", "search", "email", "password", "tel", "number", "date", "time", "url", "select", "combobox"].includes(kind);
+        if (!label && !isField) continue;
+        // A greyed-out button does nothing. A greyed-out field often opens when clicked, so it stays.
+        if (off && !isField) continue;
         const href = el.tagName === "A" ? (el as HTMLAnchorElement).href || undefined : undefined;
-        found.push({ tag: el.tagName.toLowerCase(), label, href });
+        const key = `${kind}|${label}|${href ?? ""}`;
+        if (!isField && seen.has(key)) continue;
+        seen.add(key);
+        const rect = el.getBoundingClientRect();
+        const item: Found = { tag: el.tagName.toLowerCase(), label: label || `(${kind} field)`, href, kind, near: rect.bottom > 0 && rect.top < viewH, el };
+        if (el.tagName === "SELECT") {
+          const select = el as HTMLSelectElement;
+          item.value = clean(select.selectedOptions[0]?.textContent, 60);
+          item.options = [...select.options].slice(0, 25).map((o) => clean(o.textContent, 50)).filter(Boolean);
+        } else if (isField) {
+          item.value = clean((el as HTMLInputElement).value, 60) || undefined;
+        } else if (kind === "checkbox" || kind === "radio" || kind === "switch") {
+          item.value = (el as HTMLInputElement).checked || el.getAttribute("aria-checked") === "true" ? "on" : "off";
+        }
+        all.push(item);
       }
+      // What is on screen first, then fields anywhere on the page, then the rest.
+      const fieldKinds = new Set(["text", "search", "email", "password", "tel", "number", "date", "time", "url", "select", "combobox", "option"]);
+      const ranked = [...all.filter((x) => x.near), ...all.filter((x) => !x.near && fieldKinds.has(x.kind)), ...all.filter((x) => !x.near && !fieldKinds.has(x.kind))].slice(0, 70);
+      const controls = ranked.map((item, index) => {
+        item.el.setAttribute("data-berth-ref", String(index + 1));
+        const { el: _el, near: _near, ...rest } = item;
+        return { ...rest, ref: index + 1 };
+      });
       return {
         title: document.title,
-        text: (document.body?.innerText ?? "").replace(/\n{3,}/g, "\n\n").slice(0, 8000),
-        controls: found,
+        text: (document.body?.innerText ?? "").replace(/\n{3,}/g, "\n\n").slice(0, 60000),
+        controls,
+        scrolled: Math.round(window.scrollY),
+        more: document.documentElement.scrollHeight - window.scrollY - viewH > 200,
       };
     }),
-    dock.page.screenshot({ type: "jpeg", quality: 46 }),
+    wantShot ? dock.page.screenshot({ type: "jpeg", quality: 46 }) : Promise.resolve(null),
   ]);
   const title = evalResult.status === "fulfilled" ? evalResult.value.title : "";
   const text = evalResult.status === "fulfilled" ? evalResult.value.text : "";
   const controls = evalResult.status === "fulfilled" ? evalResult.value.controls : [];
   const image =
-    shotResult.status === "fulfilled"
+    shotResult.status === "fulfilled" && shotResult.value
       ? `data:image/jpeg;base64,${shotResult.value.toString("base64")}`
       : null;
   return {
     url,
     title: title || url,
     image,
-    text: text.slice(0, 6000),
-    controls: controls.slice(0, 30),
+    text,
+    controls,
     engine: "chrome",
     challenge: false,
   };
 }
 
-async function capture(dock: Dock, open = false): Promise<Surface> {
+async function capture(dock: Dock, open = false, shot = true): Promise<Surface> {
   if (dock.kind === "reader") return readerSurface(dock);
-  const surface = await captureChrome(dock);
+  const surface = await captureChrome(dock, { shot });
   if (!open && surface.url.startsWith("http") && !sameSite(dock.homeUrl, surface.url)) {
     await dock.page.goBack({ timeout: 8000 }).catch(() => undefined);
-    const back = await captureChrome(dock);
+    const back = await captureChrome(dock, { shot });
     return back;
   }
   return surface;
@@ -507,12 +668,14 @@ function offsiteHold(surface: Surface, homeUrl: string): boolean {
 function viewFrom(surface: Surface, extras?: Partial<DockView> & { vaultHeld?: boolean }): DockView {
   return {
     ok: true,
-    surface,
+    // The model reads the whole page; the view a person sees needs far less.
+    surface: { ...surface, text: surface.text.slice(0, 6000), controls: surface.controls.slice(0, 40) },
     vaultHeld: extras?.vaultHeld ?? false,
     steps: extras?.steps ?? [],
     summary: extras?.summary ?? "",
     status: extras?.status ?? (surface.challenge ? "challenge" : "ready"),
     pendingLabel: extras?.pendingLabel ?? null,
+    ...(extras?.metrics ? { metrics: extras.metrics } : {}),
   };
 }
 
@@ -591,6 +754,14 @@ async function complete(
   return "";
 }
 
+function controlLine(control: SurfaceControl): string {
+  const bits = [`[${control.ref ?? "?"}] ${control.kind ?? control.tag}: ${control.label}`];
+  if (control.value) bits.push(`= "${control.value}"`);
+  if (control.options?.length) bits.push(`options: ${control.options.join(" | ")}`);
+  if (control.href) bits.push(`→ ${control.href.slice(0, 160)}`);
+  return bits.join(" ");
+}
+
 async function askModel(input: {
   task: string;
   memory: string;
@@ -602,10 +773,7 @@ async function askModel(input: {
   formTask?: boolean;
 }): Promise<Decision> {
   const call = modelCall();
-  const controls = input.surface.controls
-    .slice(0, 30)
-    .map((control) => (control.href ? `- ${control.label} → ${control.href}` : `- ${control.label}`))
-    .join("\n");
+  const controls = input.surface.controls.map(controlLine).join("\n");
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (call.apiKey) headers.Authorization = `Bearer ${call.apiKey}`;
   const messages: ChatMessage[] = [
@@ -613,7 +781,11 @@ async function askModel(input: {
       role: "system",
       content: [
         "You operate one website dock. Reply with JSON only, no markdown.",
-        '{"action":"click"|"type"|"select"|"clickAt"|"scroll"|"scrollUp"|"press"|"wait"|"done"|"hold","target":"","text":"","useVault":false,"sensitive":false,"summary":"","reason":""}',
+        '{"action":"click"|"type"|"select"|"clickAt"|"scroll"|"scrollUp"|"press"|"wait"|"done"|"hold","ref":null,"target":"","text":"","useVault":false,"sensitive":false,"summary":"","reason":""}',
+        "Controls are listed as [number] kind: label, with a field's current value after =. To click, type into or select a control, put its number in ref. The number is exact; a label is a guess, and two fields often share one label (a 'from' and a 'to' station box): the numbers tell them apart, and the value shows which is already filled.",
+        "After typing into a box that offers suggestions, the suggestions are listed as option controls on the next step: click the right one by its number before moving to the next field.",
+        "The page text you are given already includes passages from further down the page that match the task, so scroll only when what you need is not in it.",
+        "When you use done, summary is the complete answer for the person who asked: every figure, time, name and date, exactly as shown, in plain text with no Markdown.",
         "Decide the next step yourself. Reply with one step only.",
         "Work out what the task still needs — route, date, direction, how many people, a price, a time — and take the step that fills the biggest gap. Name that gap in reason.",
         "The answer must carry the figures the task asked for, such as a price with its currency or a departure and arrival time. Describing the page is not an answer.",
@@ -656,7 +828,7 @@ async function askModel(input: {
         `Saved login on this host: ${input.vaultHeld ? "yes" : "no"}`,
         `URL: ${input.surface.url}`,
         `Title: ${input.surface.title}`,
-        `Visible text:\n${input.surface.text.slice(0, 5000)}`,
+        `Page text:\n${focusText(input.surface.text, input.task, TEXT_FOR_MODEL)}`,
         `Controls:\n${controls || "(none listed)"}`,
       ].join("\n\n"),
     },
@@ -706,7 +878,7 @@ async function answerTask(input: {
         `Steps taken: ${input.steps.join(" → ")}`,
         `URL: ${input.surface.url}`,
         `Title: ${input.surface.title}`,
-        `Page text:\n${input.surface.text.slice(0, 6000)}`,
+        `Page text:\n${focusText(input.surface.text, input.task, TEXT_FOR_MODEL + 3000)}`,
       ].join("\n\n"),
     },
   ];
@@ -772,13 +944,16 @@ export function parseDecision(raw: string): Decision {
   if (!action) {
     throw new Error(`The assistant returned an unknown step: ${named || "(none)"}.`);
   }
+  const rawRef = json?.ref ?? slice.match(/"ref"\s*:\s*"?(\d+)"?/i)?.[1];
+  const ref = rawRef === null || rawRef === undefined || rawRef === "" ? NaN : Number(rawRef);
   return {
     action,
-    target: String(json?.target ?? pick("target")).slice(0, 160),
-    text: String(json?.text ?? pick("text")).slice(0, 400),
+    ref: Number.isInteger(ref) && ref >= 0 && ref < 1000 ? ref : null,
+    target: String(json?.target ?? pick("target")).slice(0, 300),
+    text: String(json?.text ?? pick("text")).slice(0, 600),
     useVault: Boolean(json?.useVault),
     sensitive: Boolean(json?.sensitive),
-    summary: String(json?.summary ?? pick("summary")).slice(0, 900),
+    summary: String(json?.summary ?? pick("summary")).slice(0, 4000),
     reason: String(json?.reason ?? pick("reason")).slice(0, 400),
   };
 }
@@ -815,6 +990,9 @@ function stepLabel(decision: Decision): string {
   if (decision.action === "scrollUp") return "Scrolled up the page.";
   if (decision.action === "press") return `Pressed ${KEYS.has(decision.target) ? decision.target : "Enter"}.`;
   if (decision.action === "type" && decision.useVault) return "Used the saved login.";
+  if (decision.action === "type" && typeof decision.ref === "number") {
+    return `Typed "${decision.text.slice(0, 60)}" into ${decision.target || "field"} [${decision.ref}].`;
+  }
   if (decision.action === "type") return decision.target ? `Typed into ${decision.target}.` : "Typed into the page.";
   if (decision.action === "select") return `Chose ${decision.text} in ${decision.target || "the menu"}.`;
   if (decision.action === "clickAt") return `Clicked at ${decision.target}.`;
@@ -825,6 +1003,14 @@ function pendingLabel(decision: Decision): string {
   if (decision.useVault) return "This would use the saved login. Approve it, or leave it.";
   if (decision.action === "type") return `This would type into ${decision.target || "the page"}. Approve it, or leave it.`;
   return `This would ${decision.action} ${decision.target || "the page"}. Approve it, or leave it.`;
+}
+
+/** Give a step the name of the control its number points at, so the record reads properly. */
+function named(decision: Decision, surface: Surface): Decision {
+  if (typeof decision.ref !== "number") return decision;
+  const control = surface.controls.find((c) => c.ref === decision.ref);
+  if (!control) return { ...decision, ref: null };
+  return /^https?:/i.test(decision.target) ? decision : { ...decision, target: control.label };
 }
 
 export function isRepeated(label: string, history: Step[]): boolean {
@@ -882,13 +1068,68 @@ export function parsePoint(target: string): { x: number; y: number } {
   };
 }
 
-async function settle(page: PWPage) {
-  await page.evaluate(() => document.readyState).catch(() => undefined);
-  await new Promise((resolve) => setTimeout(resolve, 150));
+/**
+ * Wait until the page has stopped changing, not a fixed pause: back at once on
+ * a static page, and long enough on one that fills itself in with scripts, so
+ * the model is not shown a half-loaded page and made to spend a step waiting.
+ */
+async function settle(page: PWPage, maxMs = 2500, calmPolls = 2) {
+  const started = Date.now();
+  let last = -1;
+  let calm = 0;
+  while (Date.now() - started < maxMs) {
+    const size = await page
+      .evaluate(() => (document.readyState === "loading" ? -1 : (document.body?.innerText.length ?? 0) + document.querySelectorAll("a,button,input").length))
+      .catch(() => -2);
+    if (size >= 0 && size === last) {
+      calm += 1;
+      if (calm >= calmPolls) return;
+    } else {
+      calm = 0;
+    }
+    last = size;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
 }
 
 async function perform(dock: ChromeDock, decision: Decision) {
   const page = dock.page;
+  const byRef = typeof decision.ref === "number" ? page.locator(`[data-berth-ref="${decision.ref}"]`).first() : null;
+  const pointed = byRef && (await byRef.count()) > 0 ? byRef : null;
+  if (pointed && !decision.useVault && (decision.action === "click" || decision.action === "type" || decision.action === "select")) {
+    if (decision.action === "select") {
+      await pointed.selectOption({ label: decision.text }, { timeout: 5000 });
+      await settle(page, 3000, 5);
+      return;
+    }
+    if (decision.action === "click" && !/^https?:\/\//i.test(decision.target.trim())) {
+      await pointed.evaluate((el) => el.scrollIntoView({ block: "center" })).catch(() => undefined);
+      await pointed.click({ timeout: 6000 });
+      await settle(page, 3000, 5);
+      return;
+    }
+    if (decision.action === "type") {
+      const locked = await pointed
+        .evaluate((el) => (el as HTMLInputElement).disabled === true || (el as HTMLInputElement).readOnly === true)
+        .catch(() => false);
+      let field = pointed;
+      if (locked) {
+        // A box that is greyed out until clicked: click where it sits, then type
+        // into whatever takes focus (the journey planners do this).
+        const box = await pointed.boundingBox().catch(() => null);
+        if (box) {
+          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+          await settle(page);
+        }
+        const focused = page.locator("input:focus, textarea:focus, [contenteditable='true']:focus").first();
+        if ((await focused.count()) > 0) field = focused;
+      }
+      await field.fill(decision.text, { timeout: 5000 });
+      if (needsQuery(page.url())) await field.press("Enter");
+      await settle(page, 3000, 5);
+      return;
+    }
+  }
   if (decision.action === "scroll" || decision.action === "scrollUp") {
     await page.mouse.move(VIEW_W / 2, VIEW_H / 2);
     await page.mouse.wheel(0, decision.action === "scrollUp" ? -720 : 720);
@@ -1107,6 +1348,8 @@ export async function runTask(input: {
   task: string;
   memory: string;
   open?: boolean;
+  /** Give up and answer with what is on the page after this long. */
+  deadlineMs?: number;
 }): Promise<DockResult> {
   let clean: string;
   try {
@@ -1115,14 +1358,34 @@ export async function runTask(input: {
     return fail(e);
   }
   return enqueueFor(clean, async () => {
+    const started = Date.now();
+    const allowed = Math.min(Math.max(input.deadlineMs ?? TASK_DEADLINE_MS, 10_000), 600_000);
+    let modelCalls = 0;
+    let partial = false;
+    // Leave room for one last model call to write the answer.
+    const outOfTime = () => Date.now() - started > allowed - Math.min(25_000, allowed * 0.3);
+    const stamp = (result: DockResult): DockResult =>
+      result.ok ? { ...result, summary: plainAnswer(result.summary), metrics: { elapsedMs: Date.now() - started, modelCalls, partial } satisfies TaskMetrics } : result;
+    const finish_ = (surface: Surface, extras?: Parameters<typeof viewFrom>[1]) => stamp(viewFrom(surface, extras));
+    const ask = (args: Parameters<typeof askModel>[0]) => {
+      modelCalls += 1;
+      return askModel(args);
+    };
+    const write = (args: Parameters<typeof answerTask>[0]) => {
+      modelCalls += 1;
+      return answerTask(args);
+    };
     try {
-      const task = input.task.trim().slice(0, 400);
+      // 400 cut a caller's task off mid-sentence; a task with form values needs the room.
+      const task = input.task.trim().slice(0, 2000);
       const memory = input.memory.trim().slice(0, 400);
       if (!task) throw new Error("Say what you want done.");
       takeTaskSlot();
       pending.delete(clean);
+      busy.add(clean);
       globalThis.__berthActiveDockId = clean;
       let dock = await ensure(clean, input.homeUrl, input.currentUrl);
+      if (dock.kind === "chrome") await settle(dock.page);
       // An open-web task starts at its search page, even if this dock was left somewhere else.
       const onStart = dock.kind === "chrome" && new URL(dock.page.url() || "about:blank").host === new URL(input.currentUrl).host;
       if (input.open && dock.kind === "chrome" && !onStart) {
@@ -1131,9 +1394,22 @@ export async function runTask(input: {
       }
       const steps: Step[] = [];
       let surface = await capture(dock, input.open);
+      // Google answers an automated browser with its "unusual traffic" page. Search elsewhere.
+      if (dock.kind === "chrome" && /google\.[a-z.]+\/sorry\//i.test(surface.url)) {
+        const elsewhere = searchFallbackUrl(surface.url, task) ?? searchFallbackUrl(input.currentUrl, task);
+        if (elsewhere) {
+          const next = await assertPublicUrl(elsewhere);
+          dock.homeUrl = next.origin;
+          await dock.page.goto(next.toString(), { waitUntil: "domcontentloaded", timeout: 20000 });
+          await settle(dock.page);
+          surface = await capture(dock, true);
+          steps.push({ label: "Google asked for a human check, so searched with DuckDuckGo instead." });
+          emitStep(clean, "Google asked for a human check, so searched with DuckDuckGo instead.");
+        }
+      }
       if (surface.challenge) {
         emitStep(clean, "The site is asking for a person.");
-        return viewFrom(surface, {
+        return finish_(surface, {
           vaultHeld: held(clean),
           steps: [{ label: "The site is asking for a person." }],
           summary: "Solve the check on the view, then continue.",
@@ -1156,10 +1432,19 @@ export async function runTask(input: {
       const budget = formTask ? MAX_FORM_MODEL_CALLS : MAX_MODEL_CALLS;
       const missBudget = formTask ? MAX_FORM_MISSES : MAX_MISSES;
       for (let i = 0; i < budget; i += 1) {
+        if (outOfTime()) {
+          partial = true;
+          const label = `Ran out of time after ${Math.round((Date.now() - started) / 1000)}s, so answered from the page as it stood.`;
+          console.warn(`[berth] ${clean} ${label} url=${surface.url}`);
+          steps.push({ label });
+          emitStep(clean, label);
+          const summary = await write({ task, surface, steps: steps.map((s) => s.label) });
+          return finish_(surface, { vaultHeld: held(clean), steps, summary, status: "ready" });
+        }
         let finish = i === budget - 1;
         let decision: Decision;
         try {
-          decision = await askModel({
+          decision = await ask({
             task,
             memory,
             vaultHeld: held(clean),
@@ -1179,8 +1464,8 @@ export async function runTask(input: {
             steps.push({ label });
             continue;
           }
-          const summary = await answerTask({ task, surface, steps: steps.map((step) => step.label) });
-          return viewFrom(surface, {
+          const summary = await write({ task, surface, steps: steps.map((step) => step.label) });
+          return finish_(surface, {
             vaultHeld: held(clean),
             steps: [...steps, { label }],
             summary,
@@ -1205,6 +1490,7 @@ export async function runTask(input: {
             reason: "",
           };
         }
+        decision = named(decision, surface);
         const label = stepLabel(decision);
         if (!forcedSearch && isRepeated(label, steps)) {
           repeats += 1;
@@ -1219,7 +1505,7 @@ export async function runTask(input: {
           }
           finish = true;
           try {
-            decision = await askModel({
+            decision = await ask({
               task,
               memory,
               vaultHeld: held(clean),
@@ -1244,7 +1530,7 @@ export async function runTask(input: {
           emitStep(clean, stepLabel(decision));
           const executable = decision.action !== "hold";
           if (executable) pending.set(clean, decision);
-          return viewFrom(surface, {
+          return finish_(surface, {
             vaultHeld: held(clean),
             steps,
             summary: decision.reason || decision.summary || "Paused.",
@@ -1272,8 +1558,13 @@ export async function runTask(input: {
         steps.push({ label: stepLabel(decision) });
         emitStep(clean, stepLabel(decision));
         if (decision.action === "done" || finish) {
-          const summary = await answerTask({ task, surface, steps: steps.map((s) => s.label) });
-          return viewFrom(surface, {
+          if (decision.action !== "done" || i === budget - 1) partial = finish && i === budget - 1;
+          // The step that decides it is done has already read the page. When it
+          // wrote a real answer, use it: one model call for a simple read, not two.
+          const own = decision.action === "done" ? decision.summary.trim() : "";
+          const usable = own.length >= 60 || (own.length >= 20 && /\d/.test(own));
+          const summary = usable ? own : await write({ task, surface, steps: steps.map((s) => s.label) });
+          return finish_(surface, {
             vaultHeld: held(clean),
             steps,
             summary,
@@ -1292,7 +1583,7 @@ export async function runTask(input: {
               continue;
             }
           }
-          return viewFrom(surface, {
+          return finish_(surface, {
             vaultHeld: held(clean),
             steps: [...steps, { label: "This host is reading the page, not clicking through Chrome." }],
             summary: decision.summary || "Open this dock where Chrome can run to go further.",
@@ -1363,15 +1654,17 @@ export async function runTask(input: {
             continue;
           }
           surface = await capture(dock, input.open);
+          partial = true;
           console.warn(`[berth] ${clean} Gave up after ${missBudget} failed actions. url=${surface.url}`);
-          const summary = await answerTask({ task, surface, steps: steps.map((s) => s.label) });
-          return viewFrom(surface, {
+          const summary = await write({ task, surface, steps: steps.map((s) => s.label) });
+          return finish_(surface, {
             vaultHeld: held(clean),
             steps: [...steps, { label: missed }, { label: `Gave up after ${missBudget} failed actions.` }],
             summary,
             status: "ready",
           });
         }
+        await followNewTab(dock);
         const left = await guardSite(dock);
         if (dock.page.url().includes("#chat")) {
           await dock.page.goBack({ timeout: 8000 }).catch(() => undefined);
@@ -1390,7 +1683,7 @@ export async function runTask(input: {
           }
         }
         if (left) {
-          return viewFrom(surface, {
+          return finish_(surface, {
             vaultHeld: held(clean),
             steps: [...steps, { label: left }],
             summary: left,
@@ -1398,7 +1691,7 @@ export async function runTask(input: {
           });
         }
         if (surface.challenge) {
-          return viewFrom(surface, {
+          return finish_(surface, {
             vaultHeld: held(clean),
             steps: [...steps, { label: "The site is asking for a person." }],
             summary: "Solve the check on the view, then continue.",
@@ -1406,10 +1699,11 @@ export async function runTask(input: {
           });
         }
       }
+      partial = true;
       const capped = `Ran out of steps after ${budget} model calls.`;
       console.warn(`[berth] ${clean} ${capped} url=${dock.kind === "chrome" ? dock.page.url() : dock.url}`);
-      const summary = await answerTask({ task, surface, steps: steps.map((s) => s.label) });
-      return viewFrom(surface, {
+      const summary = await write({ task, surface, steps: steps.map((s) => s.label) });
+      return finish_(surface, {
         vaultHeld: held(clean),
         steps: [...steps, { label: capped }, { label: "Answered from the page." }],
         summary,
@@ -1418,6 +1712,9 @@ export async function runTask(input: {
     } catch (error) {
       return fail(error);
     } finally {
+      busy.delete(clean);
+      const used = docks.get(clean);
+      if (used) used.touched = Date.now();
       if (globalThis.__berthActiveDockId === clean) globalThis.__berthActiveDockId = null;
     }
   });
@@ -1501,3 +1798,11 @@ export async function gesture(input: {
     }
   });
 }
+
+/** Test hooks. Not used by the app. */
+export const __test = {
+  async crash(id: string) {
+    const dock = docks.get(id);
+    if (dock?.kind === "chrome") await dock.page.close().catch(() => undefined);
+  },
+};

@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { env } from "@/lib/env.server";
 
 /**
@@ -11,6 +12,8 @@ export function authorized(request: Request): boolean {
     const host = request.headers.get("host") ?? "";
     return host.startsWith("127.0.0.1:") || host === "127.0.0.1" || host.startsWith("localhost:");
   }
-  const auth = request.headers.get("authorization") ?? "";
-  return auth === `Bearer ${apiKey}`;
+  const given = Buffer.from(request.headers.get("authorization") ?? "");
+  const wanted = Buffer.from(`Bearer ${apiKey}`);
+  // Constant-time, so the key can't be guessed a character at a time from response timing.
+  return given.length === wanted.length && timingSafeEqual(given, wanted);
 }
